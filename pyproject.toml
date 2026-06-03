@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+
+name = "audient-evo-linux"
+version = "0.1.0"
+authors = [
+  { name="Felix Beuermann", email="felixbeuermann@web.de" },
+]
+description = "An unofficial Python API/wrapper for the Audient EVO series (4, 8, 16) on Linux."
+readme = "README.md"
+requires-python = ">=3.8"
+
+
+dependencies = [
+    "pyusb>=1.2.1",
+]
+
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+[tool.setuptools]
+packages = ["audient_evo"]
