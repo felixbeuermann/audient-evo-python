@@ -33,10 +33,6 @@ class EvoProtocol:
     IDX_OUTPUT  = 0x3B00    # Extension Unit 59
     IDX_MONITOR = 0x3C00    # Mixer Unit ID  60 source ID 50
     IDX_BUFFER  = 0x3E00    # Extension Unit 62
-    IDX_FUI     = 0x0B00    # Feature Unit 11 - Input
-    IDX_FUO     = 0x0A00    # Feature Unit 10 - Output
-    IDX_EULB    = 0x3200    # Extension Unit 50 - Loopback something
-    IDX_EULB2   = 0x3300    # Extension Unit 51 - Loopback mapping
 
     @staticmethod
     def ch_addr(field: int, ch: int) -> int:

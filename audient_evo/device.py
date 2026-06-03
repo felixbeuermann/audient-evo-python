@@ -15,7 +15,6 @@ from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
     percent_to_mon_step, bytes_to_gain, gain_step_to_percent, bytes_to_mon_value, \
     bytes_to_volume, ui_volume_to_alsa, alsa_volume_to_ui
 
-
 class Evo8Device:
     """High-dial user-facing device API."""
 
@@ -295,42 +294,3 @@ class Evo8Device:
             self._last_state = new_state
             return True
         return False
-
-    # ---------------- New untested stuff ----------------
-
-    def get_FUI(self) -> Optional[bytes]:
-        if not self.device_controlled_by_app:
-            return None
-        try:
-            return self.transport.ctrl_get(EvoProtocol.IDX_FUI, 0x0200, length=4)
-        except Exception as e:
-            self.logger.error(f"FUI Read Error: {e}")
-            return None
-
-    def get_FUO(self) -> Optional[bytes]:
-        if not self.device_controlled_by_app:
-            return None
-        try:
-            return self.transport.ctrl_get(EvoProtocol.IDX_FUO, 0x0200, length=4) # also test with 0100
-        except Exception as e:
-            self.logger.error(f"FUO Read Error: {e}")
-            return None
-
-
-    def get_EULB(self) -> Optional[bytes]:
-        if not self.device_controlled_by_app:
-            return None
-        try:
-            return self.transport.ctrl_get(EvoProtocol.IDX_EULB, 0x0300, length=4) # also test with 0100 and 0200
-        except Exception as e:
-            self.logger.error(f"EULB Read Error: {e}")
-            return None
-
-    def get_EULB2(self) -> Optional[bytes]:
-        if not self.device_controlled_by_app:
-            return None
-        try:
-            return self.transport.ctrl_get(EvoProtocol.IDX_EULB2, 0x0300, length=4) # also test with 0100 and 0200
-        except Exception as e:
-            self.logger.error(f"EULB2 Read Error: {e}")
-            return None
