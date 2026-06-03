@@ -1,0 +1,23 @@
+# --- Python Standard ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environment ---
+.venv/
+venv/
+env/
+venv.bak/
+
+# --- IDE (PyCharm / VS Code) ---
+.idea/
+.vscode/
+
+# --- Build-Artefakte (wenn du später paketierst) ---
+dist/
+build/
+*.egg-info/
+
+# --- Betriebssystem ---
+.DS_Store
+Thumbs.db
