@@ -1,4 +1,3 @@
-
 def gain_step_to_percent(step: int) -> int:
     if not 0 <= step <= 117:
         raise ValueError("step must be in range 0..117")
@@ -212,3 +211,37 @@ def bytes_to_mon_value(data: bytes) -> int:
 def fmt_bytes(data: bytes) -> str:
     """Format raw bytes for debug logging."""
     return "[" + " ".join(f"0x{b:02X}" for b in data) + "]"
+
+
+UI_MIN = 128
+UI_MAX = 255 #255
+ALSA_MAX = 254
+SHAPE = 2.2
+
+def ui_to_norm(ui: int) -> float:
+    if ui <= UI_MIN:
+        return 0.0
+    if ui >= UI_MAX:
+        return 1.0
+    return (ui - UI_MIN) / (UI_MAX - UI_MIN)
+
+def norm_to_ui(x: float) -> int:
+    return round(UI_MIN + x * (UI_MAX - UI_MIN))
+
+def evo_curve(x: float) -> float:
+    p = SHAPE
+    return (x ** p) / (x ** p + (1 - x) ** p)
+
+def evo_curve_inv(y: float) -> float:
+    p = SHAPE
+    return (y ** (1 / p)) / ((y ** (1 / p)) + ((1 - y) ** (1 / p)))
+
+def ui_volume_to_alsa(ui: int) -> int:  # turns Values between 0 - 100 into 128 - 254
+    x = ui_to_norm(ui)
+    shaped = evo_curve(x)
+    return round(shaped * ALSA_MAX)
+
+def alsa_volume_to_ui(alsa: int) -> int: # turns Values between 128 - 254 into 0 - 100
+    y = alsa / ALSA_MAX
+    x = evo_curve_inv(y)
+    return norm_to_ui(x)

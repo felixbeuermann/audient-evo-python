@@ -28,6 +28,3 @@ __all__ = [
 "UsbNotBoundError",
 "Evo8Device",
 ]
-
-
-__version__ = "0.7.9"

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 
 name = "audient-evo-linux"
-version = "0.1.0"
+version = "0.8.0"
 authors = [
   { name="Felix Beuermann", email="felixbeuermann@web.de" },
 ]
