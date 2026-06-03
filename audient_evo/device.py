@@ -11,7 +11,7 @@ import logging
 
 from .protocol import EvoProtocol, InBlock, OutBlock, MonBlock
 from .transport import EvoUsbTransport
-from src.audient_evo.util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
+from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
     percent_to_mon_step, bytes_to_gain, gain_step_to_percent, bytes_to_mon_value, bytes_to_volume
 from src.alsaUiAdapter import ui_volume_to_alsa, alsa_volume_to_ui
 
