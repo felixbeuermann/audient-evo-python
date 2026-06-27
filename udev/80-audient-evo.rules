@@ -1,0 +1,3 @@
+SUBSYSTEM=="usb", ATTR{idVendor}=="2708", ATTR{idProduct}=="0008", MODE="0666" # EVO16
+SUBSYSTEM=="usb", ATTR{idVendor}=="2708", ATTR{idProduct}=="0007", MODE="0666" # EVO8
+SUBSYSTEM=="usb", ATTR{idVendor}=="2708", ATTR{idProduct}=="0006", MODE="0666" # EVO4
