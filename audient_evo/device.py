@@ -27,6 +27,16 @@ class Evo8Device:
 
     SAMPLE_RATE_INV = {v: k for k, v in SAMPLE_RATES.items()}
 
+    LOOPBACK_MAPPINGS = {
+        "PC1+2": (b'\x06', b'\x07'),
+        "PC3+4": (b'\x08', b'\x09'),
+        "LB1+2": (b'\x0a', b'\x0b'),
+        "MM1+2": (b'\x0c', b'\x0d'),
+        "AM1+2": (b'\x0e', b'\x0f')
+    }
+
+    LOOPBACK_MAPPINGS_INV = {v: k for k, v in LOOPBACK_MAPPINGS.items()}
+
     def __init__(self, transport: EvoUsbTransport):
         self.transport = transport
         self.device_controlled_by_app = True
@@ -215,7 +225,7 @@ class Evo8Device:
 
     # ---------------- Loopback ----------------
 
-    def get_loopback(self) -> Optional[bytes]:
+    def get_loopback(self) -> Optional[bytes]:  # TODO: refactor to return string instead of bytes
         if not self.device_controlled_by_app:
             return None
         try:
@@ -224,40 +234,20 @@ class Evo8Device:
             self.logger.error(f"Error getting loopback: {e}")
             return None
 
-    def set_loopback(self, ch: int) -> bool:
-        success = False
+    def set_loopback(self, loopback_group: str) -> bool:
+
+        if loopback_group not in self.LOOPBACK_MAPPINGS:
+            raise ValueError(f"Invalid loopback group. Supported: {list(self.LOOPBACK_MAPPINGS.keys())}")
+
         try:
-            if ch == 1 or ch == 2:
-                self.transport.ctrl_set( 0x0604, 0x3300, b'\x06')# PC1
-                self.transport.ctrl_set( 0x0605, 0x3300, b'\x07')# PC2
-                print("set loopback to PC1+2")
-                success = True
-            elif ch == 3 or ch == 4:
-                self.transport.ctrl_set(0x0604, 0x3300, b'\x08')# PC3
-                self.transport.ctrl_set(0x0605, 0x3300, b'\x09')# PC4
-                print("set loopback to PC3+4")
-                success = True
-            elif ch == 5 or ch == 6:
-                self.transport.ctrl_set(0x0604, 0x3300, b'\x0a')# LB1
-                self.transport.ctrl_set(0x0605, 0x3300, b'\x0b')# LB2
-                print("set loopback to LB1+2")
-                success = True
-            elif ch == 7 or ch == 8:
-                self.transport.ctrl_set(0x0604, 0x3300, b'\x0c')# MM1
-                self.transport.ctrl_set(0x0605, 0x3300, b'\x0d')# MM2
-                print("set loopback to Master Mix")
-                success = True
-            elif ch == 9 or ch == 10:
-                self.transport.ctrl_set(0x0604, 0x3300, b'\x0e')# AM1
-                self.transport.ctrl_set(0x0605, 0x3300, b'\x0f')# AM2
-                print("set loopback to Artist Mix")
-                success = True
-            else:
-                print(f"Unknown loopback group index: {ch}")
+            self.transport.ctrl_set(0x0604, 0x3300, self.LOOPBACK_MAPPINGS[loopback_group][0])
+            self.transport.ctrl_set(0x0605, 0x3300, self.LOOPBACK_MAPPINGS[loopback_group][1])
+            self.logger.info(f"Set loopback to {loopback_group}")
+            return True
         except Exception as e:
-            self.logger.error(f"Error setting loopback: {e}")
-            return  False
-        return success
+            self.logger.error(f"Failed to set loopback to {loopback_group}: {e}")
+            return False
+
     # ---------------- Sample Rate ----------------
 
     def get_sample_rate(self) -> int:
