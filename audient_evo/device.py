@@ -18,6 +18,15 @@ from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
 class Evo8Device:
     """High-dial user-facing device API."""
 
+    SAMPLE_RATES = {
+        44100: b'\x44\xAC\x00\x00',
+        48000: b'\x80\xBB\x00\x00',
+        88200: b'\x88\x58\x01\x00',
+        96000: b'\x00\x77\x01\x00'
+    }
+
+    SAMPLE_RATE_INV = {v: k for k, v in SAMPLE_RATES.items()}
+
     def __init__(self, transport: EvoUsbTransport):
         self.transport = transport
         self.device_controlled_by_app = True
@@ -253,34 +262,15 @@ class Evo8Device:
 
     def get_sample_rate(self) -> int:
         sr_bytes = self.transport.ctrl_get(0x2900,0x0200)
-        if sr_bytes == b'\x44\xAC\x00\x00':
-            return 44100
-        elif sr_bytes == b'\x80\xBB\x00\x00':
-            return 48000
-        elif sr_bytes == b'\x88\x58\x01\x00':
-            return 88200
-        elif sr_bytes == b'\x00\x77\x01\x00':
-            return 96000
-        return -1
+        return self.SAMPLE_RATE_INV.get(sr_bytes, -1)
 
     def set_sample_rate(self, sr:int) -> bool:
-        if sr == 44100:
-            sr_bytes = b'\x44\xAC\x00\x00'
-        elif sr == 48000:
-            sr_bytes = b'\x80\xBB\x00\x00'
-        elif sr == 88200:
-            sr_bytes = b'\x88\x58\x01\x00'
-        elif sr == 96000:
-            sr_bytes = b'\x00\x77\x01\x00'
-        else:
-            print("Invalid sample rate provided.")
-            return False
-        try:
-            self.transport.ctrl_set(0x2900, 0x0200, sr_bytes)
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to set sample rate: {e}")
-            return False
+
+        if sr not in self.SAMPLE_RATES:
+            raise ValueError(f"Unsupported sample rate {sr}. Supported: {list(self.SAMPLE_RATES.keys())}")
+
+        self.transport.ctrl_set(0x2900, 0x0200, self.SAMPLE_RATES[sr])
+        return True
 
     # ---------------- Events ----------------
 
