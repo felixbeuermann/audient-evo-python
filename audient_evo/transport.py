@@ -123,9 +123,3 @@ class EvoUsbTransport:
             self.dev.ctrl_transfer(0x21, 0x01, wValue, wIndex, data)
         except usb.core.USBError as e:
             self._handle_usb_error(e)
-
-    # ---------------- Utility ----------------
-
-    def fmt_bytes(data: bytes) -> str:
-        """Format raw bytes for debug logging."""
-        return "[" + " ".join(f"0x{b:02X}" for b in data) + "]"
