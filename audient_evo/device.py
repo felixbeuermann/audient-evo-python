@@ -15,6 +15,9 @@ from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
     percent_to_mon_step, bytes_to_gain, gain_step_to_percent, bytes_to_mon_value, \
     bytes_to_volume, ui_volume_to_alsa, alsa_volume_to_ui
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class Evo8Device:
     """High-dial user-facing device API."""
 
@@ -43,9 +46,6 @@ class Evo8Device:
         self._last_state: Optional[bytes] = None
         self.last_error: Optional[str] = None
 
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
-
     # --------------------------------------------------------
     # Control ownership
     # --------------------------------------------------------
@@ -70,7 +70,7 @@ class Evo8Device:
             )
             return True
         except Exception as e:
-            self.logger.error(f"Error setting Input {block.name} ch {ch}: {e}")
+            logger.error(f"Error setting Input {block.name} ch {ch}: {e}")
             return False
 
     def _get_input(self, block: InBlock, ch: int) -> Optional[bytes]:
@@ -83,7 +83,7 @@ class Evo8Device:
             )
             return data
         except Exception as e:
-            self.logger.error(f"Error getting Input {block.name} ch {ch}: {e}")
+            logger.error(f"Error getting Input {block.name} ch {ch}: {e}")
             return None
 
     # ---------------- Input controls ----------------
@@ -137,7 +137,7 @@ class Evo8Device:
                 )
             return True
         except Exception as e:
-            self.logger.error(f"Error setting volume: {e}")
+            logger.error(f"Error setting volume: {e}")
             return False
 
     def get_volume(self, out_ch: Sequence[int] = (1, 2)) -> int:
@@ -155,7 +155,7 @@ class Evo8Device:
                     volume = alsa_volume_to_ui(bytes_to_volume(vol_byte))
             return volume
         except Exception as e:
-            self.logger.error(f"Error getting volume: {e}")
+            logger.error(f"Error getting volume: {e}")
             return -1
 
     def set_out_mute(self, state: bool, out_ch: Sequence[int] = (1, 2)) -> bool:
@@ -171,7 +171,7 @@ class Evo8Device:
                 )
             return True
         except Exception as e:
-            self.logger.error(f"Error setting out mute: {e}")
+            logger.error(f"Error setting out mute: {e}")
             return False
 
     def get_out_mute(self, out_ch: Sequence[int] = (1, 2)) -> bool:
@@ -189,7 +189,7 @@ class Evo8Device:
                 else: state = False
             return state
         except Exception as e:
-            self.logger.error(f"Error getting out mute: {e}")
+            logger.error(f"Error getting out mute: {e}")
             return False
 
     # ---------------- Monitor mixer ----------------
@@ -207,7 +207,7 @@ class Evo8Device:
                 )
             return True
         except Exception as e:
-            self.logger.error(f"Error setting monitor: {e}")
+            logger.error(f"Error setting monitor: {e}")
             return False
 
     def get_monitor(self, in_ch: int, out_ch: Sequence[int] = (1, 2)) -> int:
@@ -220,7 +220,7 @@ class Evo8Device:
                 ))
             return monitor_vol
         except Exception as e:
-            self.logger.error(f"Error getting monitor: {e}")
+            logger.error(f"Error getting monitor: {e}")
             return -1
 
     # ---------------- Loopback ----------------
@@ -231,7 +231,7 @@ class Evo8Device:
         try:
             return self.transport.ctrl_get(0x0604, 0x3300, length=1)
         except Exception as e:
-            self.logger.error(f"Error getting loopback: {e}")
+            logger.error(f"Error getting loopback: {e}")
             return None
 
     def set_loopback(self, loopback_group: str) -> bool:
@@ -242,10 +242,10 @@ class Evo8Device:
         try:
             self.transport.ctrl_set(0x0604, 0x3300, self.LOOPBACK_MAPPINGS[loopback_group][0])
             self.transport.ctrl_set(0x0605, 0x3300, self.LOOPBACK_MAPPINGS[loopback_group][1])
-            self.logger.info(f"Set loopback to {loopback_group}")
+            logger.info(f"Set loopback to {loopback_group}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to set loopback to {loopback_group}: {e}")
+            logger.error(f"Failed to set loopback to {loopback_group}: {e}")
             return False
 
     # ---------------- Sample Rate ----------------
