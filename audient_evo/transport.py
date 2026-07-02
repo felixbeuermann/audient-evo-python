@@ -12,6 +12,18 @@ import usb.core
 import usb.util
 import time
 
+
+class UsbPipeError(RuntimeError):
+    pass
+
+
+class UsbTimeoutError(RuntimeError):
+    pass
+
+
+class UsbProtocolError(RuntimeError):
+    pass
+
 class UsbNotBoundError(RuntimeError):
     """USB device not bound or already released."""
     def __init__(self, message: str = "USB device not bound or already released"):
@@ -97,25 +109,65 @@ class EvoUsbTransport:
     # ---------------- Internal helpers ----------------
 
     def _ensure_bound(self) -> None:
-        if not self._bound or self.dev is None:
-            raise UsbNotBoundError("USB device is not bound")
+        if self.dev is None:
+            raise UsbNotBoundError("USB device is None")
 
-    def _handle_usb_error(self, error: usb.core.USBError):
-        if error.errno in (19, 32):  # ENODEV, EPIPE
-            self._bound = False
-            self.dev = None
-            raise DeviceDisconnectedError("EVO device disconnected") from error
-        raise error
+        try:
+            # Einfacher Deskriptorzugriff
+            _ = self.dev.idVendor
+            _ = self.dev.idProduct
+
+        except ValueError:
+            raise DeviceDisconnectedError("USB device object invalid")
+
+        except usb.core.USBError as e:
+            self._handle_usb_error(e)
+
+    def ping(self) -> bool:
+        try:
+            self.dev.ctrl_transfer(
+                0x80,
+                0x06,
+                0x0100,
+                0,
+                8,
+                timeout=100,
+            )
+            return True
+
+        except usb.core.USBError:
+            return False
+
+    def _handle_usb_error(self, e):
+
+        errno = getattr(e, "errno", None)
+
+        if errno == 19:
+            self._connected = False
+            raise DeviceDisconnectedError() from e
+
+        elif errno == 32:
+            raise UsbPipeError() from e
+
+        elif errno == 110:
+            raise UsbTimeoutError() from e
+
+        elif errno == 71:
+            raise UsbProtocolError() from e
+
+        else:
+            raise
 
     # ---------------- USB control transfers ----------------
 
     def ctrl_get(self, wValue: int, wIndex: int, length: int = 4) -> bytes:
         self._ensure_bound()
         try:
+            #print(f"Sending control transfer to EVO device. wValue: {wValue:02X} wIndex: {wIndex:02X} length:{length}")
             return bytes(self.dev.ctrl_transfer(0xA1, 0x01, wValue, wIndex, length))
         except usb.core.USBError as e:
             self._handle_usb_error(e)
-            return b"\x00" * length
+            #return b"\x00" * length
 
     def ctrl_set(self, wValue: int, wIndex: int, data: bytes) -> None:
         self._ensure_bound()

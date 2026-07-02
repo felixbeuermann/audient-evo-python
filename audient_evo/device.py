@@ -13,7 +13,8 @@ from .protocol import EvoProtocol, InBlock, OutBlock, MonBlock
 from .transport import EvoUsbTransport
 from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
     percent_to_mon_step, bytes_to_gain, gain_step_to_percent, bytes_to_mon_value, \
-    bytes_to_volume, ui_volume_to_alsa, alsa_volume_to_ui, is_in_range
+    bytes_to_volume, ui_volume_to_alsa, alsa_volume_to_ui, is_in_range, bytes_to_bool, \
+    bool_to_bytes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,25 +106,34 @@ class Evo8Device:
             return -1
 
     def set_phantom(self, ch: int, state: bool) -> bool:
-        return self._set_input(InBlock.PHANTOM, ch, b'\x01' if state else b'\x00')
+        return self._set_input(InBlock.PHANTOM, ch, b'\x01\x00\x00\x00' if state else b'\x00\x00\x00\x00')
 
     def get_phantom(self, ch: int) -> bool:
         state_byte = self._get_input(InBlock.PHANTOM, ch)
-        return state_byte == b'\x01'
+        if state_byte is None:
+            logger.error(f"get_phantom: state_byte is None.")
+            return False
+        return bytes_to_bool(state_byte)
 
     def set_mic_mute(self, ch: int, state: bool) -> bool:
         return self._set_input(InBlock.MUTE, ch, b'\x01' if state else b'\x00')
 
     def get_mic_mute(self, ch: int) -> bool:
         state_byte = self._get_input(InBlock.MUTE, ch)
-        return state_byte == b'\x01'
+        if state_byte is None:
+            logger.error(f"get_mic_mute: state_byte is None.")
+            return False
+        return bytes_to_bool(state_byte)
 
     def set_mono(self, ch: int, state: bool) -> bool:
         return self._set_input(InBlock.MONO, ch, b'\x01' if state else b'\x00')
 
     def get_mono(self, ch: int) -> bool:
         state_byte = self._get_input(InBlock.MONO, ch)
-        return state_byte == b'\x01'
+        if state_byte is None:
+            logger.error(f"get_mono: state_byte is None.")
+            return False
+        return bytes_to_bool(state_byte)
 
     # ---------------- Output controls ----------------
 
@@ -267,7 +277,7 @@ class Evo8Device:
 
     def event_listen(self) -> Optional[bytes]:
         if self.device_controlled_by_app:
-            return self.transport.ctrl_get(EvoProtocol.IDX_BUFFER, 0x0200)
+            return self.transport.ctrl_get(0x0600, EvoProtocol.IDX_BUFFER, 4)
         return None
 
     def event_changed(self, new_state: bytes) -> bool:
