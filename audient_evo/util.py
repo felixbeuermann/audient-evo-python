@@ -213,6 +213,9 @@ def fmt_bytes(data: bytes) -> str:
     return "[" + " ".join(f"0x{b:02X}" for b in data) + "]"
 
 
+def is_in_range(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100
+
 UI_MIN = 128
 UI_MAX = 255 #255
 ALSA_MAX = 254

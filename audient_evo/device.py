@@ -13,7 +13,7 @@ from .protocol import EvoProtocol, InBlock, OutBlock, MonBlock
 from .transport import EvoUsbTransport
 from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
     percent_to_mon_step, bytes_to_gain, gain_step_to_percent, bytes_to_mon_value, \
-    bytes_to_volume, ui_volume_to_alsa, alsa_volume_to_ui
+    bytes_to_volume, ui_volume_to_alsa, alsa_volume_to_ui, is_in_range
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -89,12 +89,16 @@ class Evo8Device:
     # ---------------- Input controls ----------------
 
     def set_gain(self, ch: int, value: int) -> bool:
+        if not is_in_range(value):
+            logger.error(f"set_gain: Invalid gain value {value}")
+            return False
         gain_byte = gain_to_bytes(percent_to_gain_step(value))
         return self._set_input(InBlock.GAIN, ch, gain_byte)
 
     def get_gain(self, ch: int) -> int:
         gain_byte = self._get_input(InBlock.GAIN, ch)
-        if gain_byte is None: return -1
+        if gain_byte is None:
+            return -1
         try:
             return gain_step_to_percent(bytes_to_gain(gain_byte))
         except KeyError:
@@ -125,6 +129,9 @@ class Evo8Device:
 
     def set_volume(self, volume: int, out_ch: Sequence[int] = (1, 2)) -> bool:
         if not self.device_controlled_by_app:
+            return False
+        if not is_in_range(volume):
+            logger.error(f"set_volume: Invalid volume {volume}")
             return False
         try:
             #volume_byte = volume_to_bytes(percent_to_out_step(volume))
@@ -192,6 +199,9 @@ class Evo8Device:
     def set_monitor(self, value: int, in_ch: int, out_ch: Sequence[int] = (1, 2)) -> bool:
         if not self.device_controlled_by_app:
             return False
+        if not is_in_range(value):
+            logger.error(f"set_gain: Invalid gain value {value}")
+            return False
         try:
             monitor_byte = mon_value_to_bytes(percent_to_mon_step(value))
             for ch in out_ch:
@@ -230,10 +240,8 @@ class Evo8Device:
             return None
 
     def set_loopback(self, loopback_group: str) -> bool:
-
         if loopback_group not in self.LOOPBACK_MAPPINGS:
             raise ValueError(f"Invalid loopback group. Supported: {list(self.LOOPBACK_MAPPINGS.keys())}")
-
         try:
             self.transport.ctrl_set(0x0604, 0x3300, self.LOOPBACK_MAPPINGS[loopback_group][0])
             self.transport.ctrl_set(0x0605, 0x3300, self.LOOPBACK_MAPPINGS[loopback_group][1])
@@ -250,10 +258,8 @@ class Evo8Device:
         return self.SAMPLE_RATE_INV.get(sr_bytes, -1)
 
     def set_sample_rate(self, sr:int) -> bool:
-
         if sr not in self.SAMPLE_RATES:
             raise ValueError(f"Unsupported sample rate {sr}. Supported: {list(self.SAMPLE_RATES.keys())}")
-
         self.transport.ctrl_set(0x2900, 0x0200, self.SAMPLE_RATES[sr])
         return True
 
