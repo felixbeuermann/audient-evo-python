@@ -145,17 +145,16 @@ class Evo8Device:
             return -1
         try:
             volume = 0
-            for ch in out_ch:
-                vol_byte = self.transport.ctrl_get(
-                    EvoProtocol.ch_addr(OutBlock.VOLUME, ch),
-                    EvoProtocol.IDX_OUTPUT,
-                    1
+            vol_byte = self.transport.ctrl_get(
+                EvoProtocol.ch_addr(OutBlock.VOLUME, out_ch[0]),
+                EvoProtocol.IDX_OUTPUT,
+                1
                 )
-                if vol_byte:
-                    volume = alsa_volume_to_ui(bytes_to_volume(vol_byte))
+            if vol_byte:
+                volume = alsa_volume_to_ui(bytes_to_volume(vol_byte))
             return volume
         except Exception as e:
-            logger.error(f"Error getting volume: {e}")
+            logger.error(f"Error getting volume for {out_ch[0]} + {out_ch[1]}: {e}")
             return -1
 
     def set_out_mute(self, state: bool, out_ch: Sequence[int] = (1, 2)) -> bool:
@@ -178,16 +177,12 @@ class Evo8Device:
         if not self.device_controlled_by_app:
             return False
         try:
-            for ch in out_ch:
-                state_byte = self.transport.ctrl_get(
-                    EvoProtocol.ch_addr(OutBlock.MUTE, ch),
-                    EvoProtocol.IDX_OUTPUT,
-                    1
-                )
-                if state_byte == b'\x01':
-                    state = True
-                else: state = False
-            return state
+            state_byte = self.transport.ctrl_get(
+                EvoProtocol.ch_addr(OutBlock.MUTE, out_ch[0]),
+                EvoProtocol.IDX_OUTPUT,
+                1
+            )
+            return state_byte == b'\x01'
         except Exception as e:
             logger.error(f"Error getting out mute: {e}")
             return False
