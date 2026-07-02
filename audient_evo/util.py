@@ -216,6 +216,15 @@ def fmt_bytes(data: bytes) -> str:
 def is_in_range(value):
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100
 
+def bytes_to_bool(data: bytes) -> bool:
+    if len(data) != 4:
+        raise ValueError(f"Expected 4 bytes, got {len(data)}")
+
+    return data[0] != 0
+
+def bool_to_bytes(value: bool) -> bytes:
+    return b"\x01\x00\x00\x00" if value else b"\x00\x00\x00\x00"
+
 UI_MIN = 128
 UI_MAX = 255 #255
 ALSA_MAX = 254

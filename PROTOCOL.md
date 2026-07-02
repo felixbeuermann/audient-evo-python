@@ -18,7 +18,7 @@ This project communicates with the firmware using:
 * **bmRequestType**: `0xA1` (IN/GET), `0x21` (OUT/SET)
 * **bRequest**: `0x01` (CUR), `0x02` (RANGE), `0x03` (MEM)
 * **wValue**: Control selector / offset
-* **wIndex**: Control block / address space (Extension Units)
+* **wIndex**: Endpoint / address space (Extension Units)
 
 ---
 
@@ -61,7 +61,7 @@ Example:
 | MUTE    | 0x0200 | Input mute        |
 | MONO    | 0x0300 | Mono downmix      |
 
-Boolean controls use a single byte:
+Boolean controls use 4 bytes, though only the first byte is relevant. The others are always `0x00`.:
 
 * `0x00` → off
 * `0x01` → on
@@ -117,20 +117,60 @@ Known values:
 
 ## Event Buffer
 
-Polling:
-
+**Request:** `0xa1, 0x01, 0x0600, 0x3e00, 0x0004`  
+**Response:**
+```text
+ff 01 00 ff
+01 00 00 3a
+00 01 00 3a
 ```
-ctrl_get(wValue=0x0600, wIndex=IDX_BUFFER)
+
+**Polling:**
+```python
+ctrl_get(wValue=0x0600, wIndex=IDX_BUFFER) #dev.event_listen()
 ```
 
-Returns a firmware-managed state blob.
+Returns a firmware-managed state blob like one of these:
+```text
+0100003a
+0102003a
+0100003b
+0101003b
+0002003b
+0102003b
+0003003b
+0103003b
+ff0300ff
+ff0300ff
+```
+
+They are structured like this:
+
+`interface` | `channel` | `endpoint` | `Unit`
+
+| Byte | Field      | Description                                                    |
+|------|------------|----------------------------------------------------------------|
+| 1    | Interface  | Selector used (matches first byte of `wValue`)                |
+| 2    | Channel    | Channel number used (matches second byte of `wValue`)         |
+| 3    | Endpoint   | Typically ignored; only endpoint 0 is used (`wIndex` byte 2)  |
+| 4    | Unit       | Unit communicated with (matches first byte of `wIndex`)       |
+
+**Empty Buffer Indicator:** <br>
+If the first and last bytes are `ff`, then the buffer is currently empty (you already are at the latest buffer object).
+
 
 This is used for:
+* Detecting changes made to the Hardware.
 
-* Detecting external changes
-* Synchronizing UI state
+**Example:**
 
----
+`01|02|00|3a` <br>
+Selector: `0x01` (gain) <br>
+Channel: `0x02` (channel 3) <br>
+Endpoint: `0x00` <br>
+Unit: `0x3a` (Extention Unit 58) <br>
+
+now I can send a get request for the gain of channel 3 (dev.get_gain(3))
 
 ## Known Unknowns
 
@@ -141,10 +181,6 @@ This is used for:
 
 TODO: Showcase the captured requests:
 
-request: 0xa1, 0x01, 0x0600, 0x3e00, 0x0004
-response: ff 01 00 ff | 01 00 00 3a
-                        00 01 00 3a
-            channel, selector, interface, Unit
 * request: 0x21, 0x01, 0x0600, 0x3a00, 0x4d4943203100 (Text: MIC1)
 * request: 0x21, 0x01, 0x0601, 0x3a00, 0x4d4943203200 (Text: MIC2)
 * request: 0x21, 0x01, 0x0602, 0x3a00, 0x4d4943203300 (Text: MIC3)
