@@ -11,16 +11,16 @@ def percent_to_gain_step(percent: int) -> int:
     return round(percent * 117 / 100)
 
 def out_step_to_percent(step: int) -> int:
-    if not 0 <= step <= 158:
+    if not 0 <= step <= 160:
         raise ValueError("step must be in range 0..120")
 
-    return round(step * 100 / 158)
+    return round(step * 100 / 160)
 
 def percent_to_out_step(percent: int) -> int:
     if not 0 <= percent <= 100:
         raise ValueError("percent must be in range 0..100")
 
-    return round(percent * 158 / 100)
+    return round(percent * 160 / 100)
 
 def percent_to_out(percent:int):
     if not 0 <= percent <= 100:
@@ -87,13 +87,13 @@ def generate_out_bytes():               # TODO: maybe replace with alsa mapping 
     add(0x00, 0x81)
     for b1 in range(0x84, 0xe1, 0x01):
         add(0x00, b1)
-    for b1 in range(0xe1, 0xff, 0x01):
+    for b1 in range(0xe0, 0xff, 0x01): # added: 'Unknown volume byte sequence: 80 E0 FF FF'
         for b0 in (0x00, 0x80):
             add(b0, b1)
     steps.append([0x00, 0xff, 0xff, 0xff])
     steps.append([0x80, 0xff, 0xff, 0xff])
     steps.append([0x00, 0x00, 0x00, 0x00])
-    print(len(steps))
+    #print(len(steps))
     return steps
 
 _OUTPUT_STEPS = generate_out_bytes()
@@ -257,3 +257,24 @@ def alsa_volume_to_ui(alsa: int) -> int: # turns Values between 128 - 254 into 0
     y = alsa / ALSA_MAX
     x = evo_curve_inv(y)
     return norm_to_ui(x)
+
+
+class UsbPipeError(RuntimeError):
+    pass
+
+
+class UsbTimeoutError(RuntimeError):
+    pass
+
+
+class UsbProtocolError(RuntimeError):
+    pass
+
+class UsbNotBoundError(RuntimeError):
+    """USB device not bound or already released."""
+    def __init__(self, message: str = "USB device not bound or already released"):
+        super().__init__(message)
+
+class DeviceDisconnectedError(RuntimeError):
+    def __init__(self, message: str = "USB device disconnected"):
+        super().__init__(message)
