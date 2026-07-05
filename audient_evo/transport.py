@@ -12,7 +12,6 @@ import usb.core
 import usb.util
 import time
 import atexit
-import signal
 import sys
 
 from audient_evo.util import UsbNotBoundError, DeviceDisconnectedError, UsbPipeError, UsbTimeoutError, UsbProtocolError
@@ -112,12 +111,6 @@ class EvoUsbTransport:
                 sys.exit(0)
 
         atexit.register(cleanup)
-        try:
-            # Signale funktionieren in Python nur im Main-Thread
-            signal.signal(signal.SIGINT, cleanup)
-            signal.signal(signal.SIGTERM, cleanup)
-        except ValueError:
-            pass  # Ignorieren, falls der Transport in einem Sub-Thread erstellt wird
 
 
     # ---------------- Internal helpers ----------------
