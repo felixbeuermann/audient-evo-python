@@ -26,67 +26,13 @@ class MonBlock(IntEnum):
     """Monitor mixer control blocks (wValue offsets)."""
     VOLUME  = 0x0100
 
-class EvoProtocol:
+class EvoUnits:
     """Static helpers for EVO firmware addressing. (wIndex)"""
 
     IDX_INPUT   = 0x3A00    # Extension Unit 58
     IDX_OUTPUT  = 0x3B00    # Extension Unit 59
     IDX_MONITOR = 0x3C00    # Mixer Unit ID  60 source ID 50
     IDX_BUFFER  = 0x3E00    # Extension Unit 62
-
-    @staticmethod
-    def ch_addr(field: int, ch: int) -> int:
-        """Return channel-based address (1-based) (final wValue)."""
-        return field + (ch - 1)
-
-    @staticmethod
-    def mon_addr(field: int, in_ch: int, out_ch: int) -> int:
-        """Return monitor matrix address. (final wValue)"""
-        return field + (in_ch - 1) * 4 + (out_ch - 1)
-
-class EVO8Addresses:
-    SAMPLE_RATE    = (0x2900, 0x0200)
-    LOOPBACK_LEFT  = (0x0604, 0x3300)
-    LOOPBACK_RIGHT = (0x0605, 0x3300)
-
-    PHANTOM_POWER  = (0x0000, 0x3A00)
-    GAIN           = (0x0100, 0x3A00)
-    MIC_MUTE       = (0x0200, 0x3A00)
-    MIC_MONO       = (0x0300, 0x3A00)
-
-    VOLUME         = (0x0000, 0x3B00)
-    OUTPUT_MUTE    = (0x0100, 0x3B00)
-
-    MONITOR        = (0x0100, 0x3C00)
-    #MONITOR_MUTE
-    #MONITOR_MONO  = (0x0300, 0x3C00)
-
-    def __init__(self, values):
-        # Store the tuple internally
-        self._values = values
-
-    def __call__(self, index):
-        # Allow the instance to be called like a function: instance(0)
-        return self._values[index]
-
-    def __repr__(self):
-        # Optional: Makes debugging/printing cleaner
-        return f"AddressPair{self._values}"
-
-EVO8TOHARDWARE = {
-    "sample_rate":      (0x2900, 0x0200),
-    "loopback_left":    (0x0604, 0x3300),
-    "loopback_right":   (0x0605, 0x3300),
-
-    "phantom_power":    (0x0000, 0x3A00),
-    "gain":             (0x0100, 0x3A00),
-    "mic_mute":         (0x0200, 0x3A00),
-    "mic_mono":         (0x0300, 0x3A00),
-
-    "volume":           (0x0000, 0x3B00),
-    "output_mute":      (0x0100, 0x3B00),
-
-    }
 
 SAMPLE_RATES = {
     44100: b'\x44\xAC\x00\x00',
@@ -97,7 +43,7 @@ SAMPLE_RATES = {
 
 SAMPLE_RATE_INV = {v: k for k, v in SAMPLE_RATES.items()}
 
-LOOPBACK_MAPPINGS = {
+LOOPBACK_SOURCES = {
     "PC1+2": (b'\x06', b'\x07'),
     "PC3+4": (b'\x08', b'\x09'),
     "LB1+2": (b'\x0a', b'\x0b'),
@@ -105,14 +51,44 @@ LOOPBACK_MAPPINGS = {
     "AM1+2": (b'\x0e', b'\x0f')
 }
 
-LOOPBACK_MAPPINGS_INV = {v: k for k, v in LOOPBACK_MAPPINGS.items()}
+LOOPBACK_TARGETS = {
+    "PC1+2": (0x0600, 0x0601),
+    "PC3+4": (0x0602, 0x0603),
+    "LB1+2": (0x0604, 0x0605)
+}
+
+LOOPBACK_MAPPINGS_INV = {v: k for k, v in LOOPBACK_SOURCES.items()}
+
+CATEGORY_TO_HARDWARE = {
+    "phantom":          {"wValue_base": 0x0000, "wIndex": 0x3A00, "length": 1},
+    "gain":             {"wValue_base": 0x0100, "wIndex": 0x3A00, "length": 4},
+    "mic_mute":         {"wValue_base": 0x0200, "wIndex": 0x3A00, "length": 1},
+    "mic_mono":         {"wValue_base": 0x0300, "wIndex": 0x3A00, "length": 1},
+    
+    "volume":           {"wValue_base": 0x0000, "wIndex": 0x3B00, "length": 4},
+    "out_mute":         {"wValue_base": 0x0100, "wIndex": 0x3B00, "length": 1},
+    "out_stereo":       {"wValue_base": 0x0200, "wIndex": 0x3B00, "length": 1},
+
+    "monitor":          {"wValue_base": 0x0100, "wIndex": 0x3C00, "length": 4},
+
+    "monitor_bridge": {"wValue_base": 0x0100, "wIndex": 0x3200, "length": 1}, # EXPERIMENTAL: WILL CRASH
+
+    "sample_rate":      {"wValue_base": 0x0100, "wIndex": 0x2900, "length": 4},
+    #"loopback_target":  {"wValue_base": 0x0600, "wIndex": 0x3300, "length": 1},
+
+    #"artist_mix":       {"wValue_base": 0x????, "wIndex": 0x????, "length": 1}, # TODO: CHECK USB DUMPS FOR CORRECT ADDRESSES
+
+    "get_event":       {"wValue_base": 0x0600, "wIndex": 0x3E00, "length": 4},
+
+
+    }
 
 HARDWARE_TO_CATEGORY = {
     # Unit 58 (Inputs)
     (58, 0x00): "phantom",
     (58, 0x01): "gain",
     (58, 0x02): "mic_mute",
-    (58, 0x03): "mono",
+    (58, 0x03): "mic_mono",
 
     # Unit 59 (Outputs)
     (59, 0x00): "volume",
@@ -122,9 +98,9 @@ HARDWARE_TO_CATEGORY = {
     (60, 0x01): "monitor",
 
     # Unit 2 (sample rate)
-    (2, 0x29): "sample_rate",
+    (41, 0x01): "sample_rate",
 
     # Unit 51 (loopback)
-    (51, 0x0604): "loopback_left",
-    (51, 0x0605): "loopback_right"
+    (51, 0x0604): "loopback_left", # this is the left loopback (LB 1) Target channel (look at LOOPBACK_TARGETS above)
+    (51, 0x0605): "loopback_right" # this is the right loopback (LB 2) Target channel
 }
