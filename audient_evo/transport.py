@@ -55,7 +55,7 @@ class EvoUsbTransport:
                     self.dev.detach_kernel_driver(i)
                     self._detached_interfaces.add(i)
             except usb.core.USBError as e:
-                print(f"Warning: Could not detach kernel driver on interface {i}: {e}")
+                logger.exception(f"Warning: Could not detach kernel driver on interface {i}: {e}")
 
         try:
             usb.util.claim_interface(self.dev, 0)
@@ -74,9 +74,9 @@ class EvoUsbTransport:
             try:
                 usb.util.release_interface(self.dev, i)
             except usb.core.USBError as e:
-                logger.warning(f"Failed to release interface {i}: {e}")
+                logger.exception(f"Failed to release interface {i}: {e}")
             except Exception as e:
-                logger.error(f"Unexpected error releasing interface {i}: {e}")
+                logger.exception(f"Unexpected error releasing interface {i}: {e}")
 
         # 2. Dispose libusb resources
         usb.util.dispose_resources(self.dev)
@@ -90,7 +90,7 @@ class EvoUsbTransport:
                 if not self.dev.is_kernel_driver_active(i):
                     self.dev.attach_kernel_driver(i)
             except usb.core.USBError as e:
-                print(f"Could not reattach kernel driver on interface {i}: {e}")
+                logger.exception(f"Could not reattach kernel driver on interface {i}: {e}")
 
         self.dev = None
         self._bound = False
@@ -100,18 +100,18 @@ class EvoUsbTransport:
 
     def _setup_graceful_exit(self):
         def cleanup(signum=None, frame=None):
-            # Versucht bedingungslos, den Treiber wieder freizugeben
+            # Attempts to unconditionally release the driver
             try:
-                self.release()
-            except Exception:
-                pass
+                if hasattr(self, 'dev') and self.dev is not None:
+                    self.release()
+            except Exception as e:
+                logger.exception(f"Cleanup non-fatal error: {e}")
 
-            # Wenn durch ein Signal (z.B. Ctrl+C) ausgelöst, Skript sauber beenden
+            # If triggered by a signal (e.g., Ctrl+C), terminate the script cleanly
             if signum is not None:
                 sys.exit(0)
 
         atexit.register(cleanup)
-
 
     # ---------------- Internal helpers ----------------
 
@@ -120,7 +120,7 @@ class EvoUsbTransport:
             raise UsbNotBoundError("USB device is None")
 
         try:
-            # Einfacher Deskriptorzugriff
+            # easy descriptor access
             _ = self.dev.idVendor # vendor_id?
             _ = self.dev.idProduct
 
@@ -132,7 +132,7 @@ class EvoUsbTransport:
 
     def ping(self) -> bool:
         try:
-            self.dev.ctrl_transfer(
+            self.dev.ctrl_transfer( # TODO: CONFIRM THIS WORKS, NOT MANUALLY TESTED
                 0x80,
                 0x06,
                 0x0100,
@@ -167,19 +167,19 @@ class EvoUsbTransport:
 
     # ---------------- USB control transfers ----------------
 
-    def ctrl_get(self, wValue: int, wIndex: int, length: int = 4) -> bytes:
+    def ctrl_get(self, wValue: int, wIndex: int, length: int = 4, timeout: int = 500) -> bytes:
         self._ensure_bound()
         try:
             #print(f"Sending control transfer to EVO device. wValue: {wValue:02X} wIndex: {wIndex:02X} length:{length}")
-            return bytes(self.dev.ctrl_transfer(0xA1, 0x01, wValue, wIndex, length))
+            return bytes(self.dev.ctrl_transfer(0xA1, 0x01, wValue, wIndex, length, timeout))
         except usb.core.USBError as e:
             self._handle_usb_error(e)
             #return b"\x00" * length
 
-    def ctrl_set(self, wValue: int, wIndex: int, data: bytes) -> bool:
+    def ctrl_set(self, wValue: int, wIndex: int, data: bytes, timeout: int = 500) -> bool:
         self._ensure_bound()
         try:
-            self.dev.ctrl_transfer(0x21, 0x01, wValue, wIndex, data)
+            self.dev.ctrl_transfer(0x21, 0x01, wValue, wIndex, data, timeout)
             return True
         except usb.core.USBError as e:
             self._handle_usb_error(e)
