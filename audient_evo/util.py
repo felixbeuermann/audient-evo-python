@@ -22,23 +22,17 @@ def percent_to_out_step(percent: int) -> int:
 
     return round(percent * 160 / 100)
 
-def percent_to_out(percent:int):
-    if not 0 <= percent <= 100:
-        raise ValueError("percent must be in range 0..100")
-
-    return round(percent * 127 / 100)
-
 def mon_step_to_percent(step: int) -> int:
-    if not 0 <= step <= 178:
-        raise ValueError("step must be in range 0..178")
+    if not 0 <= step <= 180:
+        raise ValueError("step must be in range 0..180")
 
-    return round(step * 100 / 178)
+    return round(step * 100 / 180)
 
 def percent_to_mon_step(percent: int) -> int:
     if not 0 <= percent <= 100:
         raise ValueError("percent must be in range 0..100")
 
-    return round(percent * 178 / 100)
+    return round(percent * 180 / 100)
 
 def generate_mon_bytes():
     steps = []
@@ -67,6 +61,8 @@ def generate_mon_bytes():
         for b0 in fine:
             add(b0, b1)
 
+    steps.append([0x00, 0x00, 0xFF, 0xFF])
+
     return steps
 
 _MONITOR_STEPS = generate_mon_bytes()
@@ -77,7 +73,7 @@ def debug_print_step(step):
 def generate_out_bytes():               # TODO: maybe replace with alsa mapping ( 0 - 255/4)
     # total number of steps = count of discrete byte1 values
     steps = []
-    #print(steps)    # currently 158
+    #print(steps)    # currently 160
 
     # Helper to append a full 4-byte value
     def add(b0, b1):
@@ -92,7 +88,7 @@ def generate_out_bytes():               # TODO: maybe replace with alsa mapping 
             add(b0, b1)
     steps.append([0x00, 0xff, 0xff, 0xff])
     steps.append([0x80, 0xff, 0xff, 0xff])
-    steps.append([0x00, 0x00, 0x00, 0x00])
+    steps.append([0x00, 0x00, 0x00, 0x00]) # TODO: FIGURE OUT #####################################################################################################
     #print(len(steps))
     return steps
 
@@ -190,9 +186,11 @@ _GAIN_INDEX = {tuple(step): i for i, step in enumerate(_GAIN_STEPS)}
 
 def bytes_to_gain(data: bytes) -> int:
     key = tuple(data)
-    if key not in _GAIN_INDEX:
-        raise KeyError(f"Unknown volume byte sequence: {key:04X}")
-    return _GAIN_INDEX[key]
+    try:
+        return _GAIN_INDEX[key]
+    except KeyError:
+        key_str = ' '.join(f'{b:02X}' for b in key)
+        raise KeyError(f"Unknown volume byte sequence: {key_str}")
 
 def bytes_to_volume(data: bytes) -> int:
     key = tuple(data)
@@ -203,10 +201,14 @@ def bytes_to_volume(data: bytes) -> int:
         raise KeyError(f"Unknown volume byte sequence: {key_str}")
 
 def bytes_to_mon_value(data: bytes) -> int:
+    if data == b'\x00\x00\x00\x00':
+        return 0  # when the later two bytes are zero then the monitor is off, when it's connected they are both 256
     key = tuple(data)
-    if key not in _MONITOR_INDEX:
-        raise KeyError(f"Unknown volume byte sequence: {key:04X}")
-    return _MONITOR_INDEX[key]
+    try:
+        return _MONITOR_INDEX[key]
+    except KeyError:
+        key_str = ' '.join(f'{b:02X}' for b in key)
+        raise KeyError(f"Unknown volume byte sequence: {key_str}")
 
 def fmt_bytes(data: bytes) -> str:
     """Format raw bytes for debug logging."""
@@ -262,10 +264,8 @@ def alsa_volume_to_ui(alsa: int) -> int: # turns Values between 128 - 254 into 0
 class UsbPipeError(RuntimeError):
     pass
 
-
 class UsbTimeoutError(RuntimeError):
     pass
-
 
 class UsbProtocolError(RuntimeError):
     pass
@@ -278,3 +278,15 @@ class UsbNotBoundError(RuntimeError):
 class DeviceDisconnectedError(RuntimeError):
     def __init__(self, message: str = "USB device disconnected"):
         super().__init__(message)
+
+def calculate_wValue(field: int, ch: int) -> int:
+    """Return channel-based address (1-based) (final wValue)."""
+    return field + (ch - 1)
+
+def calculate_monitor_wValue(field: int, in_ch: int, out_ch: int) -> int:
+    """Return monitor matrix address. (final wValue)"""
+    return field + (in_ch - 1) * 4 + (out_ch - 1)
+
+def get_partner_channel(ch: int) -> int:
+    """Get Stereo-Partner of channel(1<->2, 3<->4, etc.)."""
+    return ch + 1 if ch % 2 != 0 else ch - 1
