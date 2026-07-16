@@ -14,16 +14,16 @@ Modules:
 """
 
 
-from .protocol import EvoProtocol, InBlock, OutBlock, MonBlock
+#from .protocol import EvoProtocol, InBlock, OutBlock, MonBlock
 from .transport import EvoUsbTransport, UsbNotBoundError
 from .device import Evo8Device
 
 
 __all__ = [
-"EvoProtocol",
-"InBlock",
-"OutBlock",
-"MonBlock",
+#"EvoProtocol",
+#"InBlock",
+#"OutBlock",
+#"MonBlock",
 "EvoUsbTransport",
 "UsbNotBoundError",
 "Evo8Device",
