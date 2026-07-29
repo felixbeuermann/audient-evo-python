@@ -61,9 +61,9 @@ LOOPBACK_MAPPINGS_INV = {v: k for k, v in LOOPBACK_SOURCES.items()}
 
 CATEGORY_TO_HARDWARE = {
     "phantom":          {"wValue_base": 0x0000, "wIndex": 0x3A00, "length": 1},
-    "gain":             {"wValue_base": 0x0100, "wIndex": 0x3A00, "length": 4},
+    "gain":             {"wValue_base": 0x0100, "wIndex": 0x3A00, "length": 2},
     "mic_mute":         {"wValue_base": 0x0200, "wIndex": 0x3A00, "length": 1},
-    "mic_mono":         {"wValue_base": 0x0300, "wIndex": 0x3A00, "length": 1},
+    "mic_stereo":         {"wValue_base": 0x0300, "wIndex": 0x3A00, "length": 1},
     
     "volume":           {"wValue_base": 0x0000, "wIndex": 0x3B00, "length": 4},
     "out_mute":         {"wValue_base": 0x0100, "wIndex": 0x3B00, "length": 1},
@@ -88,11 +88,12 @@ HARDWARE_TO_CATEGORY = {
     (58, 0x00): "phantom",
     (58, 0x01): "gain",
     (58, 0x02): "mic_mute",
-    (58, 0x03): "mic_mono",
+    (58, 0x03): "mic_stereo",
 
     # Unit 59 (Outputs)
     (59, 0x00): "volume",
     (59, 0x01): "out_mute",
+    (59, 0x02): "out_stereo",
 
     # Unit 60 (Monitor)
     (60, 0x01): "monitor",
