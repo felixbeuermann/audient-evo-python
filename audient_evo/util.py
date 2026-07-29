@@ -1,3 +1,21 @@
+# Gain-Range (according to XML saves and usb dumps)
+MIN_GAIN_RAW = -2048
+MAX_GAIN_RAW = 12800
+
+def gain_to_percent(raw_val: int) -> int:
+    """Convert raw DSP-Gain-Value to 0-100%."""
+    # Clamping into valid range
+    clamped = max(MIN_GAIN_RAW, min(MAX_GAIN_RAW, raw_val))
+    # Percent calculation: (raw - min) / (max - min) * 100
+    percent = (clamped - MIN_GAIN_RAW) / (MAX_GAIN_RAW - MIN_GAIN_RAW) * 100
+    return int(round(percent))
+
+def percent_to_gain(percent: int) -> int:
+    """Convert 0-100% into a raw DSP-Gain-Value."""
+    percent = max(0, min(100, percent))
+    raw_val = MIN_GAIN_RAW + (percent / 100 * (MAX_GAIN_RAW - MIN_GAIN_RAW))
+    return int(round(raw_val))
+
 def gain_step_to_percent(step: int) -> int:
     if not 0 <= step <= 117:
         raise ValueError("step must be in range 0..117")
@@ -219,13 +237,13 @@ def is_in_range(value):
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100
 
 def bytes_to_bool(data: bytes) -> bool:
-    if len(data) != 4:
-        raise ValueError(f"Expected 4 bytes, got {len(data)}")
+    if len(data) != 1:
+        raise ValueError(f"Expected 1 byte, got {len(data)}")
 
     return data[0] != 0
 
 def bool_to_bytes(value: bool) -> bytes:
-    return b"\x01\x00\x00\x00" if value else b"\x00\x00\x00\x00"
+    return b"\x01" if value else b"\x00"
 
 UI_MIN = 128
 UI_MAX = 255 #255
@@ -290,3 +308,18 @@ def calculate_monitor_wValue(field: int, in_ch: int, out_ch: int) -> int:
 def get_partner_channel(ch: int) -> int:
     """Get Stereo-Partner of channel(1<->2, 3<->4, etc.)."""
     return ch + 1 if ch % 2 != 0 else ch - 1
+
+def split_monitor_channel(mon_ch: int) -> tuple[int, int]:
+    """
+    Teilt einen kombinierten Monitor-Channel-Wert zurück in in_ch und out_ch.
+    Formel: wValue = base_offset + (in_ch - 1) * 4 + (out_ch - 1)
+    """
+
+    # 2. Determine out_ch (remainder of division by 4)
+    # Since (out_ch - 1) ranges from 0 to 3, this is modulo 4
+    out_ch = (mon_ch % 4) + 1
+
+    # 3. Determine in_ch (integer division by 4)
+    in_ch = (mon_ch // 4) + 1
+
+    return in_ch, out_ch

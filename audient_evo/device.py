@@ -5,50 +5,64 @@
 High-dial EVO 8 device API.
 This is the primary interface intended for UI and scripting.
 """
+import struct
 import time
-from typing import Optional, Callable, Any
 import threading
-from functools import wraps
+import queue
+from typing import Optional, Callable
+from concurrent.futures import Future
 
-import usb
+from functools import wraps
 
 from .protocol import LOOPBACK_SOURCES, SAMPLE_RATES, \
     SAMPLE_RATE_INV, LOOPBACK_MAPPINGS_INV, LOOPBACK_TARGETS, CATEGORY_TO_HARDWARE
 from .transport import EvoUsbTransport
 from .state import EvoStateManager
 from .worker import EvoBackgroundWorker
-from .util import gain_to_bytes, percent_to_gain_step, mon_value_to_bytes, \
-    percent_to_mon_step, bytes_to_gain, gain_step_to_percent, bytes_to_mon_value, \
-    bytes_to_volume, is_in_range, out_step_to_percent, volume_to_bytes,\
-    percent_to_out_step, DeviceDisconnectedError, UsbNotBoundError, \
-    get_partner_channel, calculate_monitor_wValue, mon_step_to_percent
+from .util import mon_value_to_bytes, \
+    percent_to_mon_step, bytes_to_mon_value, \
+    bytes_to_volume, is_in_range, out_step_to_percent, volume_to_bytes, \
+    percent_to_out_step, get_partner_channel, calculate_monitor_wValue,  \
+    mon_step_to_percent, gain_to_percent, percent_to_gain
 
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class UsbTask:
+    """Encapsulate method call for the queue."""
+    def __init__(self, func, args, kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.future = Future()
+
 def safe_usb_transaction(func: Callable) -> Callable:
     """
-    Decorator that combines thread safety (Lock) AND error handling (Try/Catch)
+    Decorator that combines thread safety AND error handling (Try/Catch)
     for USB transactions.
     """
 
     @wraps(func)
-    def wrapper(self, *args, **kwargs) -> Any:
-        # 1. lock Thread
-        with self._lock:
-            # 2. Try-Catch for USB-Transactions
+    def wrapper(self, *args, **kwargs):
+        is_getter = func.__name__.startswith("get_")
+
+        if getattr(threading.current_thread(), "is_usb_worker", False):
             try:
                 return func(self, *args, **kwargs)
-            except usb.core.USBError as e:
-                # Logs the error along with the name of the function that failed!
-                logger.exception(f"Hardware-Fehler in '{func.__name__}': {e}")
-                # If it's a setter (normally returns bool), return False
-                if func.__name__.startswith("set_"):
-                    return False
-                # If it's a getter, return None or -1
-                return -1
+            except Exception as e:
+                logger.exception(f"Hardware-Error in '{func.__name__}': {e}")
+                return -1 if is_getter else False
+
+        task = UsbTask(func, (self,) + args, kwargs)
+        self.command_queue.put(task)
+
+        try:
+            return task.future.result(timeout=2.0)
+        except Exception as e:
+            logger.exception(f"Hardware-Error in '{func.__name__}' via Queue: {e}")
+            return -1 if is_getter else False
 
     return wrapper
 
@@ -65,66 +79,62 @@ class Evo8Device:
 
         self.transport = transport
 
-        self.device_controlled_by_app = True
-
-        # 1. The central RLock (Reentrant Lock) for absolute thread safety
-        self._lock = threading.RLock()
-
-        # 2. Initialize sub-systems
         self.state = EvoStateManager()
-        self.worker = EvoBackgroundWorker(self, self.state, self._lock)
+        self.command_queue = queue.Queue()
+        self.worker = EvoBackgroundWorker(self, self.state)
 
-        # Optional: Query the hardware once at startup
-        # to initially populate the cache (Initial Sync)
-        if self._initialize_state_from_hardware():
-            # Start background threads
+    # --------------------------------------------------------
+    # Control ownership
+    # --------------------------------------------------------
+
+    def connect_hardware(self) -> bool:     # TODO IMPLEMENT DISCONNECT METHOD
+        if self.transport.is_connected() and not self.transport.ghost_mode:
+            return True
+        try:
+            self.transport.connect()
             self.worker.start()
+            self._initialize_state_from_hardware()
+            return True
+        except Exception as e:
+            logger.exception(f"Error connecting to hardware: {e}")
+            self.transport.ghost_mode = True
+            return False
 
-    def close(self) -> None:
-        """Shuts down the device and stops all threads cleanly."""
+    def disconnect_hardware(self) -> None:
+        """Stop Communication, give back to ALSA and turn on Ghost Mode."""
+        if self.transport.ghost_mode: return
+        logger.info("Giving Hardware back to ALSA (Ghost Mode)...")
         self.worker.stop()
-        with self._lock:
-            self.transport.release()
-        logger.info("EVO 8 Device successfully closed.")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        self.transport.release()
 
         # ---------------- INITIALISIERUNG ----------------
 
-    def _initialize_state_from_hardware(self) -> bool:
+    def _initialize_state_from_hardware(self):
         """Reads all important values live from the device at startup to populate the cache."""
         logger.info("Synchronizing initial state from hardware...")
         success = True
         try:
+            self.set_monitor(0, 10, 20)  # Wakeup monitor by calling out of range monitor address
+            time.sleep(0.05)
+
             for ch in range(1, self.NUM_INPUTS+1):
-                gain = self.get_gain(ch)
-                self.state.update_input(ch, "gain", gain)
-                phantom = self.get_phantom(ch)
-                self.state.update_input(ch, "phantom", phantom)
-                mic_mute = self.get_mic_mute(ch)
-                self.state.update_input(ch, "mic_mute", mic_mute)
-                mic_mono = self.get_mic_mono(ch)
-                self.state.update_input(ch, "stereo_link", mic_mono)
+                self.state.update_input(ch, "gain", self.get_gain(ch))
+                self.state.update_input(ch, "phantom", self.get_phantom(ch))
+                self.state.update_input(ch, "mute", self.get_mic_mute(ch))
+                self.state.update_input(ch, "stereo_link", self.get_mic_stereo(ch))
 
             for ch in range (1, self.NUM_OUTPUTS+1):
-                volume = self.get_volume(ch)
-                self.state.update_output(ch, "volume", volume)
-                out_mute = self.get_out_mute(ch)
-                self.state.update_output(ch, "out_mute", out_mute)
-                out_stereo = self.get_out_stereo(ch)
-                self.state.update_output(ch, "stereo_link", out_stereo)
+                self.state.update_output(ch, "volume", self.get_volume(ch))
+                self.state.update_output(ch, "mute", self.get_out_mute(ch))
+                self.state.update_output(ch, "stereo_link", self.get_out_stereo(ch))
 
+            time.sleep(0.05)
 
-            self.set_monitor(0, 10, 20) # Wakeup monitor by calling non-existent monitor address
-            for in_ch in range(1, self.NUM_MONITOR_INPUTS+1):
-                for out_ch in range(1, self.NUM_OUTPUTS+1):
-                    monitor = self.get_monitor(in_ch, out_ch)
-                    self.state.update_monitor(in_ch, out_ch, "volume", monitor)
+            for in_ch in range(1, self.NUM_MONITOR_INPUTS + 1):
+                for out_ch in range(1, self.NUM_OUTPUTS + 1):
+                    self.state.update_monitor(in_ch, out_ch, "volume", self.get_monitor(in_ch, out_ch))
                     time.sleep(0.01)
+
 
             loopback_source = self.get_loopback("LB1+2")
             if loopback_source not in LOOPBACK_SOURCES:
@@ -146,24 +156,8 @@ class Evo8Device:
             logger.exception(f"Init state from hardware failed: {e}")
         return False
 
-    # --------------------------------------------------------
-    # Control ownership
-    # --------------------------------------------------------
 
-    def toggle_driver_control(self) -> bool:
-        try:
-            if self.transport.ping(): # Probably not necessary to check for a response here
-                self.transport.release()
-            else:
-                self.transport.connect()
-            self.device_controlled_by_app = not self.device_controlled_by_app
-            return True
-        except (DeviceDisconnectedError, UsbNotBoundError):
-            logger.warning("Device disconnected during control toggle")
-            return False
-
-
-
+    # ---------------- Internal Helper Functions ----------------
 
     def _set_parameter(self, param_name: str, data: bytes, ch: Optional[int] = None, out_ch: Optional[int] = None) -> bool:
         """Central function for sending USB values based on the dictionary."""
@@ -182,7 +176,6 @@ class Evo8Device:
             wValue = mapping["wValue_base"]
 
         return self.transport.ctrl_set(wValue, mapping["wIndex"], data)
-
 
     def _get_parameter(self, param_name: str, ch: Optional[int] = None, out_ch: Optional[int] = None) -> bytes:
         """Central function for querying USB values based on the dictionary."""
@@ -205,7 +198,7 @@ class Evo8Device:
 
     @safe_usb_transaction
     def set_phantom(self, ch: int, state: bool) -> bool:
-        state_byte = state.to_bytes(1)
+        state_byte = state.to_bytes(length=1)
         success = self._set_parameter("phantom", state_byte, ch)
         if success:
             self.state.update_input(ch, "phantom", state)
@@ -217,37 +210,35 @@ class Evo8Device:
         if state_byte is None:
             logger.error(f"get_phantom: state_byte is None.")
             return False
-        return bool(state_byte)
+        return state_byte == b'\x01'
 
     @safe_usb_transaction
     def set_gain(self, ch: int, value: int) -> bool:
         if not is_in_range(value):
             logger.error(f"set_gain: Invalid gain value {value}")
             return False
-        gain_bytes = gain_to_bytes(percent_to_gain_step(value))
-
-        success = self._set_parameter("gain", gain_bytes, ch)
-
-        if success:
-            self.state.update_input(ch, "gain", value)
-        return success
+        gain_bytes = percent_to_gain(value)
+        data = struct.pack('<h', gain_bytes)
+        wValue = 0x0100 + (ch - 1)
+        #print(f"set_gain: gain_bytes={gain_bytes}, data={data}, value={value}")     # TODO TEST 0 - 100 in a loop
+        return self.transport.ctrl_set(wValue, 0x3A00, data)
 
     @safe_usb_transaction
     def get_gain(self, ch: int) -> int:
-        if ch not in range(1, self.NUM_INPUTS+1): #TODO: REMOVE FROM HERE BUT MAKE GLOBAL WITHOUT REPEATING IT 200 TIMES
-            gain_bytes = self._get_parameter("gain", ch)
-            if gain_bytes is None:
-                return -1
-
-            return gain_step_to_percent(bytes_to_gain(gain_bytes))
+        if ch not in range(1, self.NUM_INPUTS+1):
+            return -1
+        gain_bytes = self._get_parameter("gain", ch)
+        if gain_bytes and len(gain_bytes) == 2:
+            val = struct.unpack('<h', gain_bytes)[0]
+            return gain_to_percent(val)
         return -1
 
     @safe_usb_transaction
     def set_mic_mute(self, ch: int, state: bool) -> bool:
-        state_byte = state.to_bytes(1) # TODO MAKE BOOL_TO_BYTE RETURN 1 BYTE NOT 4!!!!!!!!!#########################################################################################################
+        state_byte = state.to_bytes(length=1)
         success = self._set_parameter("mic_mute", state_byte, ch)
         if success:
-            self.state.update_input(ch, "mic_mute", state)
+            self.state.update_input(ch, "mute", state)
         return success
 
     @safe_usb_transaction
@@ -256,23 +247,23 @@ class Evo8Device:
         if state_byte is None:
             logger.error(f"get_mic_mute: state_byte is None.")
             return False
-        return bool(state_byte)
+        return state_byte == b'\x01'
 
     @safe_usb_transaction
-    def set_mic_mono(self, ch: int, state: bool) -> bool:
-        state_byte = state.to_bytes(1)
-        success = self._set_parameter("mic_mono", state_byte, ch)
+    def set_mic_stereo(self, ch: int, state: bool) -> bool:
+        state_byte = state.to_bytes(length=1)
+        success = self._set_parameter("mic_stereo", state_byte, ch)
         if success:
             self.state.update_input(ch, "stereo_link", state)
         return success
 
     @safe_usb_transaction
-    def get_mic_mono(self, ch: int) -> bool:
-        state_byte = self._get_parameter("mic_mono", ch)
+    def get_mic_stereo(self, ch: int) -> bool:
+        state_byte = self._get_parameter("mic_stereo", ch)
         if state_byte is None:
-            logger.error(f"get_mono: state_byte is None.")
+            logger.error(f"get_mic_stereo: state_byte is None.")
             return False
-        return bool(state_byte)
+        return state_byte == b'\x01'
 
     # ---------------- Output controls ----------------
 
@@ -307,7 +298,7 @@ class Evo8Device:
 
     @safe_usb_transaction
     def set_out_mute(self, state: bool, out_ch: int) -> bool:
-        state_byte = state.to_bytes(1)
+        state_byte = state.to_bytes(length=1)
         success = self._set_parameter("out_mute", state_byte, out_ch)
 
         if success:
@@ -322,7 +313,7 @@ class Evo8Device:
     @safe_usb_transaction
     def get_out_mute(self, out_ch: int) -> bool:
         state_byte = self._get_parameter("out_mute", out_ch)
-        return bool(state_byte)
+        return state_byte == b'\x01'
 
     @safe_usb_transaction
     def set_out_stereo(self, out_ch: int, enable: bool) -> bool:
@@ -330,19 +321,19 @@ class Evo8Device:
         Toggles Mono/Stereo.
         ch: The channel from which the action originates (important when enabling the link!)
         """
-        state_byte = enable.to_bytes(1)
+        state_byte = enable.to_bytes(length=1)
         # Send the link command (0x0200)
         success = self._set_parameter("out_stereo", state_byte, out_ch)
 
         if success:
             partner = get_partner_channel(out_ch)
 
-            # 1. We update the link status for both channels in the cache
+            # 1. Update the link status for both channels in the cache
             self.state.update_output(out_ch, "stereo_link", enable)
             self.state.update_output(partner, "stereo_link", enable)
 
             # 2. When linking, the hardware copies the volume from 'ch' to 'partner'.
-            # Our cache must now reflect this!
+            #    the cache must now reflect this!
             if enable:
                 current_vol = self.state.get_output(out_ch, "volume")
                 if current_vol != -1:
@@ -353,7 +344,7 @@ class Evo8Device:
     @safe_usb_transaction
     def get_out_stereo(self, out_ch: int) -> bool:
         state_byte = self._get_parameter("out_stereo", out_ch)
-        return bool(state_byte)
+        return state_byte == b'\x01'
 
     # ---------------- Monitor Mixer ----------------
 
@@ -364,20 +355,30 @@ class Evo8Device:
             return False
         monitor_bytes = mon_value_to_bytes(percent_to_mon_step(value))
 
-        success = self._set_parameter("monitor", monitor_bytes, in_ch, out_ch)
-        if success:
-            self.state.update_monitor(in_ch, out_ch, "volume", value)
+        out_targets = [out_ch]
+        if self.state.get_output(out_ch, "stereo_link"):
+            out_targets.append(get_partner_channel(out_ch))
 
-            if self.state.get_output(out_ch, "stereo_link"):
-                partner = get_partner_channel(out_ch)
-                self.state.update_monitor(in_ch, partner, "volume", value)
-
+        # Determine input targets (check state for analog channels, digital are ALWAYS stereo)
+        in_targets = [in_ch]
+        if in_ch <= self.NUM_INPUTS:
             if self.state.get_input(in_ch, "stereo_link"):
-                partner = get_partner_channel(in_ch)
-                self.state.update_monitor(partner, out_ch, "volume", value)
+                in_targets.append(get_partner_channel(in_ch))
+        else:
+            # Channels 5-10 (PC & Loopback) are inherently fixed stereo pairs
+            in_targets.append(get_partner_channel(in_ch))
 
-        return success
+        # 3. Process the complete routing block (1x1, 1x2, 2x1, or 2x2 matrix)
+        success_overall = True
+        for i_ch in in_targets:
+            for o_ch in out_targets:
+                success = self._set_parameter("monitor", monitor_bytes, i_ch, o_ch)
+                if success:
+                    self.state.update_monitor(i_ch, o_ch, "volume", value)
+                else:
+                    success_overall = False
 
+        return success_overall
 
     @safe_usb_transaction
     def get_monitor(self, in_ch: int, out_ch: int) -> int:
@@ -391,15 +392,13 @@ class Evo8Device:
 
     @safe_usb_transaction
     def set_monitor_bridge(self, enable: bool) -> bool:
-        # 1 Byte boolean!
         data = b'\x01' if enable else b'\x00'
-        # Kein 'ch' notwendig!
         return self._set_parameter("monitor_bridge", data)
 
     @safe_usb_transaction
     def get_monitor_bridge(self) -> bool:
         mon_bridge_bytes = self._get_parameter("monitor_bridge") #TODO: THIS IS VERY EXPERIMENTAL
-        return bool(mon_bridge_bytes)
+        return mon_bridge_bytes == b'\x01'
 
     # ---------------- Loopback ----------------
 
@@ -457,7 +456,7 @@ class Evo8Device:
 
     # ---------------- Events ----------------
 
-    #@safe_usb_transaction # locking here might freeze when trying to react to changes (set_vol etc)
+    @safe_usb_transaction
     def event_listen(self) -> Optional[bytes]:
         return self.transport.ctrl_get(0x0600, 0x3E00, 4, 500)
 

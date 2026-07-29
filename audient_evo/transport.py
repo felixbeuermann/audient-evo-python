@@ -28,14 +28,14 @@ class EvoUsbTransport:
         self.vendor_id = vendor_id
         self.product_id = product_id
         self.dev: Optional[usb.core.Device] = None
-        self._bound = False
-        self._claimed_interfaces: set[int] = set()
+        self._is_connected = False
+        self.ghost_mode = True
         self._detached_interfaces: set[int] = set()
+        self.find_device()
 
         self._setup_graceful_exit()
 
     def __enter__(self):
-        self.connect()
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -44,9 +44,7 @@ class EvoUsbTransport:
     # ---------------- Device Lifecycle ----------------
 
     def connect(self) -> Optional[EvoUsbTransport]:
-        self.dev = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)
-        if self.dev is None:
-            raise RuntimeError(f"EVO device (VID:{self.vendor_id:04X}, PID:{self.product_id:04X}) not found")
+        self.find_device()
 
         # Detach kernel drivers (interfaces 0–3)
         for i in range(4):
@@ -59,17 +57,17 @@ class EvoUsbTransport:
 
         try:
             usb.util.claim_interface(self.dev, 0)
-            self._bound = True
+            self._is_connected = True
+            self.ghost_mode = False
         except usb.core.USBError as e:
             raise RuntimeError(f"Failed to claim interface 0: {e}")
 
         return self
 
     def release(self) -> None:
-        if not self._bound or self.dev is None:
+        if not self._is_connected or self.dev is None:
             return
 
-        # 1. Release claimed interfaces
         for i in self._detached_interfaces:
             try:
                 usb.util.release_interface(self.dev, i)
@@ -78,13 +76,10 @@ class EvoUsbTransport:
             except Exception as e:
                 logger.exception(f"Unexpected error releasing interface {i}: {e}")
 
-        # 2. Dispose libusb resources
         usb.util.dispose_resources(self.dev)
 
-        # 3. Small delay to avoid race with PipeWire / ALSA
         time.sleep(0.1)
 
-        # 4. Reattach kernel driver
         for i in self._detached_interfaces:
             try:
                 if not self.dev.is_kernel_driver_active(i):
@@ -93,10 +88,11 @@ class EvoUsbTransport:
                 logger.exception(f"Could not reattach kernel driver on interface {i}: {e}")
 
         self.dev = None
-        self._bound = False
+        self._is_connected = False
+        self.ghost_mode = True
 
     def is_connected(self) -> bool:
-        return self.dev is not None and self._bound
+        return self.dev is not None and self._is_connected
 
     def _setup_graceful_exit(self):
         def cleanup(signum=None, frame=None):
@@ -115,20 +111,13 @@ class EvoUsbTransport:
 
     # ---------------- Internal helpers ----------------
 
-    def _ensure_bound(self) -> None:
+    def find_device(self):
+        self.dev = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)
         if self.dev is None:
-            raise UsbNotBoundError("USB device is None")
+            raise RuntimeError(f"EVO device (VID:{self.vendor_id:04X}, PID:{self.product_id:04X}) not found")
 
-        try:
-            # easy descriptor access
-            _ = self.dev.idVendor # vendor_id?
-            _ = self.dev.idProduct
-
-        except ValueError:
-            raise DeviceDisconnectedError("USB device object invalid")
-
-        except usb.core.USBError as e:
-            self._handle_usb_error(e)
+    def _ensure_bound(self) -> None:
+        if self.dev is None: raise UsbNotBoundError()
 
     def ping(self) -> bool:
         try:
@@ -168,15 +157,19 @@ class EvoUsbTransport:
     # ---------------- USB control transfers ----------------
 
     def ctrl_get(self, wValue: int, wIndex: int, length: int = 4, timeout: int = 500) -> bytes:
+        if self.ghost_mode:
+            return b"\x00" * length
         self._ensure_bound()
         try:
             #print(f"Sending control transfer to EVO device. wValue: {wValue:02X} wIndex: {wIndex:02X} length:{length}")
             return bytes(self.dev.ctrl_transfer(0xA1, 0x01, wValue, wIndex, length, timeout))
         except usb.core.USBError as e:
             self._handle_usb_error(e)
-            #return b"\x00" * length
+            return b"\x00" * length
 
     def ctrl_set(self, wValue: int, wIndex: int, data: bytes, timeout: int = 500) -> bool:
+        if self.ghost_mode:
+            return True
         self._ensure_bound()
         try:
             self.dev.ctrl_transfer(0x21, 0x01, wValue, wIndex, data, timeout)
