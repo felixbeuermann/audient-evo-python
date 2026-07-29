@@ -25,7 +25,7 @@ This library allows direct USB communication with the EVO hardware, replicating 
 
 The library is built on three logical layers, completely independent of any UI frameworks:
 
-* `Evo8Device`: High‑level device API. Converts semantic actions into protocol commands.
+* `EvoDevice`: High‑level device API. Converts semantic actions into protocol commands.
 * `EvoProtocol`: Pure helper class containing addressing rules and calculators (no USB logic).
 * `EvoUsbTransport`: Low‑level USB transport handling discovery, interface claiming, and control transfers.
 
@@ -59,11 +59,13 @@ The library is built on three logical layers, completely independent of any UI f
 ## Usage Example
 
 ```python
-from audient_evo import EvoUsbTransport, Evo8Device
+from audient_evo import EvoUsbTransport, EvoDevice
 
-transport = EvoUsbTransport()
-transport.connect()
-evo = Evo8Device(transport)
+transport = EvoUsbTransport.discover()
+evo = EvoDevice(transport)
+
+evo.connect_hardware()
+
 evo.set_gain(1, 40)  # gain range 0 - 100
 evo.set_phantom(1, True)
 ```
@@ -107,7 +109,7 @@ Pure helper class that:
 
 Contains **no USB logic**.
 
-#### `Evo8Device`
+#### `EvoDevice`
 
 High‑level API intended for UI and scripting:
 

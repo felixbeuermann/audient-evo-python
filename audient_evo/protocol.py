@@ -7,7 +7,7 @@ EVO USB protocol helpers
 Pure address-calculation logic for the Audient EVO 8 firmware.
 No USB or device state is handled here.
 """
-
+from dataclasses import dataclass
 from enum import IntEnum
 
 class InBlock(IntEnum):
@@ -104,4 +104,36 @@ HARDWARE_TO_CATEGORY = {
     # Unit 51 (loopback)
     (51, 0x0604): "loopback_left", # this is the left loopback (LB 1) Target channel (look at LOOPBACK_TARGETS above)
     (51, 0x0605): "loopback_right" # this is the right loopback (LB 2) Target channel
+}
+
+@dataclass(frozen=True)
+class DeviceCapabilities:
+    name: str
+    pid: int
+    num_inputs: int
+    num_outputs: int
+    num_monitor_inputs: int
+
+EVO_PROFILES: dict[int, DeviceCapabilities] = {
+    0x0008: DeviceCapabilities(
+        name="EVO 16",
+        pid=0x0008,
+        num_inputs=8,
+        num_outputs=8,
+        num_monitor_inputs=14,
+    ),
+    0x0007: DeviceCapabilities(
+        name="EVO 8",
+        pid=0x0007,
+        num_inputs=4,
+        num_outputs=4,
+        num_monitor_inputs=10,
+    ),
+    0x0006: DeviceCapabilities(
+        name="EVO 4",
+        pid=0x0006,
+        num_inputs=2,
+        num_outputs=2,
+        num_monitor_inputs=6,
+    ),
 }

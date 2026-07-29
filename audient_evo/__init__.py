@@ -16,7 +16,7 @@ Modules:
 
 #from .protocol import EvoProtocol, InBlock, OutBlock, MonBlock
 from .transport import EvoUsbTransport, UsbNotBoundError
-from .device import Evo8Device
+from .device import EvoDevice
 
 
 __all__ = [
@@ -26,5 +26,5 @@ __all__ = [
 #"MonBlock",
 "EvoUsbTransport",
 "UsbNotBoundError",
-"Evo8Device",
+"EvoDevice",
 ]

@@ -66,20 +66,17 @@ def safe_usb_transaction(func: Callable) -> Callable:
 
     return wrapper
 
-class Evo8Device:
+class EvoDevice:
     """High-dial user-facing device API."""
 
     def __init__(self, transport: EvoUsbTransport):
         self._last_state: Optional[bytes] = None
         self.last_error: Optional[str] = None
 
-        self.NUM_INPUTS = 4
-        self.NUM_OUTPUTS = 4
-        self.NUM_MONITOR_INPUTS = 10
-
         self.transport = transport
+        self.profile = transport.profile
 
-        self.state = EvoStateManager()
+        self.state = EvoStateManager(self.profile)
         self.command_queue = queue.Queue()
         self.worker = EvoBackgroundWorker(self, self.state)
 
@@ -117,24 +114,23 @@ class Evo8Device:
             self.set_monitor(0, 10, 20)  # Wakeup monitor by calling out of range monitor address
             time.sleep(0.05)
 
-            for ch in range(1, self.NUM_INPUTS+1):
+            for ch in range(1, self.profile.num_inputs+1):
                 self.state.update_input(ch, "gain", self.get_gain(ch))
                 self.state.update_input(ch, "phantom", self.get_phantom(ch))
                 self.state.update_input(ch, "mute", self.get_mic_mute(ch))
                 self.state.update_input(ch, "stereo_link", self.get_mic_stereo(ch))
 
-            for ch in range (1, self.NUM_OUTPUTS+1):
+            for ch in range (1, self.profile.num_outputs+1):
                 self.state.update_output(ch, "volume", self.get_volume(ch))
                 self.state.update_output(ch, "mute", self.get_out_mute(ch))
                 self.state.update_output(ch, "stereo_link", self.get_out_stereo(ch))
 
             time.sleep(0.05)
 
-            for in_ch in range(1, self.NUM_MONITOR_INPUTS + 1):
-                for out_ch in range(1, self.NUM_OUTPUTS + 1):
+            for in_ch in range(1, self.profile.num_monitor_inputs + 1):
+                for out_ch in range(1, self.profile.num_outputs + 1):
                     self.state.update_monitor(in_ch, out_ch, "volume", self.get_monitor(in_ch, out_ch))
                     time.sleep(0.01)
-
 
             loopback_source = self.get_loopback("LB1+2")
             if loopback_source not in LOOPBACK_SOURCES:
@@ -225,8 +221,6 @@ class Evo8Device:
 
     @safe_usb_transaction
     def get_gain(self, ch: int) -> int:
-        if ch not in range(1, self.NUM_INPUTS+1):
-            return -1
         gain_bytes = self._get_parameter("gain", ch)
         if gain_bytes and len(gain_bytes) == 2:
             val = struct.unpack('<h', gain_bytes)[0]
@@ -361,7 +355,7 @@ class Evo8Device:
 
         # Determine input targets (check state for analog channels, digital are ALWAYS stereo)
         in_targets = [in_ch]
-        if in_ch <= self.NUM_INPUTS:
+        if in_ch <= self.profile.num_inputs:
             if self.state.get_input(in_ch, "stereo_link"):
                 in_targets.append(get_partner_channel(in_ch))
         else:

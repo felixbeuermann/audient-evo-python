@@ -14,6 +14,7 @@ import time
 import atexit
 import sys
 
+from audient_evo.protocol import DeviceCapabilities, EVO_PROFILES
 from audient_evo.util import UsbNotBoundError, DeviceDisconnectedError, UsbPipeError, UsbTimeoutError, UsbProtocolError
 
 import logging
@@ -24,14 +25,12 @@ logger = logging.getLogger(__name__)
 class EvoUsbTransport:
     """Low-dial USB transport abstraction."""
 
-    def __init__(self, vendor_id: int = 0x2708, product_id: int = 0x0007):
-        self.vendor_id = vendor_id
-        self.product_id = product_id
-        self.dev: Optional[usb.core.Device] = None
+    def __init__(self, dev: usb.core.Device, profile: DeviceCapabilities):
+        self.dev = dev
+        self.profile = profile
         self._is_connected = False
         self.ghost_mode = True
         self._detached_interfaces: set[int] = set()
-        self.find_device()
 
         self._setup_graceful_exit()
 
@@ -43,9 +42,30 @@ class EvoUsbTransport:
 
     # ---------------- Device Lifecycle ----------------
 
-    def connect(self) -> Optional[EvoUsbTransport]:
-        self.find_device()
+    @classmethod
+    def discover(cls) -> "EvoUsbTransport":
+        """
+        Scannt den USB-Bus nach Audient EVO Geräten, identifiziert das Modell
+        und gibt eine vorkonfigurierte Transport-Instanz zurück.
+        """
+        # Scanne nach allen Audient-Geräten auf dem Bus
+        devices = list(usb.core.find(find_all=True, idVendor=0x2708))
 
+        if not devices:
+            raise RuntimeError("Kein Audient USB-Gerät gefunden.")
+
+        for dev in devices:
+            pid = dev.idProduct
+            if pid in EVO_PROFILES:
+                profile = EVO_PROFILES[pid]
+                logger.info(f"✨ Audient Hardware erkannt: {profile.name} (PID: {hex(pid)})")
+                return cls(dev=dev, profile=profile)
+
+        raise RuntimeError("Audient-Gerät gefunden, aber Modell (PID) ist unbekannt.")
+
+    def connect(self) -> Optional[EvoUsbTransport]:
+        if self.dev is None:
+            raise RuntimeError("Device is None. was discover() called?")
         # Detach kernel drivers (interfaces 0–3)
         for i in range(4):
             try:
@@ -110,11 +130,6 @@ class EvoUsbTransport:
         atexit.register(cleanup)
 
     # ---------------- Internal helpers ----------------
-
-    def find_device(self):
-        self.dev = usb.core.find(idVendor=self.vendor_id, idProduct=self.product_id)
-        if self.dev is None:
-            raise RuntimeError(f"EVO device (VID:{self.vendor_id:04X}, PID:{self.product_id:04X}) not found")
 
     def _ensure_bound(self) -> None:
         if self.dev is None: raise UsbNotBoundError()

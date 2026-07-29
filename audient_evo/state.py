@@ -10,6 +10,8 @@ No USB or Threading logic lives here.
 from dataclasses import dataclass
 import logging
 
+from audient_evo.protocol import DeviceCapabilities
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -43,17 +45,19 @@ class GlobalState:
 class EvoStateManager:
     """Manages the entire known state of the EVO 8."""
 
-    def __init__(self):
+    def __init__(self, capabilities: DeviceCapabilities):
+        self.capabilities = capabilities
+
         # --- Inputs (1-4) ---
-        self.inputs = {ch: InputState() for ch in range(1, 5)}
+        self.inputs = {ch: InputState() for ch in range(1, self.capabilities.num_inputs+1)}
 
         # --- Outputs (1-4) ---
-        self.outputs = {ch: OutputState() for ch in range(1, 5)}
+        self.outputs = {ch: OutputState() for ch in range(1, self.capabilities.num_outputs+1)}
 
         # --- Hardware-Monitor/DSP-Channels (10 Inputs -> 4 Outputs) ---
         self.matrix = {}
-        for in_ch in range(1, 11):
-            for out_ch in range(1, 5):
+        for in_ch in range(1, self.capabilities.num_monitor_inputs+1):
+            for out_ch in range(1, self.capabilities.num_outputs+1):
                 self.matrix[(in_ch, out_ch)] = MatrixNode()
 
         # --- Global State ---
@@ -144,7 +148,7 @@ class EvoStateManager:
         print(f"  Loopback_target    : {lb_target if lb_target else 'Nicht gesetzt'}")
 
         # --- Inputs ---
-        print("\n[ INPUTS (1-4) ]")
+        print(f"\n[ INPUTS (1-{self.capabilities.num_inputs}) ]")
         for ch, inp in self.inputs.items():
             # Formatting: Values right-aligned for a clean table
             gain_str = f"{inp.gain:>3}%" if inp.gain not in (None, -1) else "N/A "
@@ -152,22 +156,22 @@ class EvoStateManager:
                   f"Mute: {'ON' if inp.mute else 'OFF':<3} | Link: {'ON' if inp.stereo_link else 'OFF':<3}")
 
         # --- Outputs ---
-        print("\n[ OUTPUTS (1-4) ]")
+        print(f"\n[ OUTPUTS (1-{self.capabilities.num_outputs}) ]")
         for ch, out in self.outputs.items():
             vol_str = f"{out.volume:>3}%" if out.volume not in (None, -1) else "N/A "
             print(f"  OUT {ch}| Vol: {vol_str}  | Mute: {'ON' if out.mute else 'OFF':<3} | "
                   f"Link: {'ON' if out.stereo_link else 'OFF':<3}")
 
         # --- Monitor Matrix ---
-        print("\n[ MONITOR MATRIX (10 Inputs -> 4 Outputs) ]")
+        print(f"\n[ MONITOR MATRIX ({self.capabilities.num_monitor_inputs} Inputs -> {self.capabilities.num_outputs} Outputs) ]")
         # Kopfzeile
-        print(" " * 10 + " ".join([f"OUT {i + 1}".ljust(6) for i in range(4)]))
+        print(" " * 10 + " ".join([f"OUT {i + 1}".ljust(6) for i in range(self.capabilities.num_outputs)]))
         print(" " * 10 + "-" * 25)
 
         # We loop over the 10 internal inputs (including PC and Loopback)
-        for in_ch in range(1, 11):
+        for in_ch in range(1, self.capabilities.num_monitor_inputs+1):
             row_str = f" IN {in_ch:2} |"
-            for out_ch in range(1, 5):
+            for out_ch in range(1, self.capabilities.num_outputs+1):
                 # Hole den Wert aus dem Cache
                 vol = self.get_monitor(in_ch, out_ch, "volume")
 
