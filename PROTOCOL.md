@@ -75,7 +75,7 @@ Boolean controls use 4 bytes, though only the first byte is relevant. The others
 | VOLUME | 0x0000 | Output volume |
 | MUTE   | 0x0100 | Output mute   |
 
-Volume values are raw firmware-scaled bytes.
+Volume values are 16-Bit Signed Integers in a ran ge of `[-32768, 32767]`:
 
 ---
 
@@ -174,10 +174,10 @@ now I can send a get request for the gain of channel 3 (dev.get_gain(3))
 
 ## Known Unknowns
 
-* SOLO implementation
-* Loopback routing semantics
+~~* SOLO implementation~~
+~~* Loopback routing semantics~~
 * Firmware state persistence
-* Exact volume curve mapping
+~~* Exact volume curve mapping~~
 
 TODO: Showcase the captured requests:
 

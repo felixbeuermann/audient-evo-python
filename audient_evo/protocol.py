@@ -71,12 +71,8 @@ CATEGORY_TO_HARDWARE = {
 
     "monitor":          {"wValue_base": 0x0100, "wIndex": 0x3C00, "length": 4},
 
-    "monitor_bridge": {"wValue_base": 0x0100, "wIndex": 0x3200, "length": 1}, # EXPERIMENTAL: WILL CRASH
-
     "sample_rate":      {"wValue_base": 0x0100, "wIndex": 0x2900, "length": 4},
     #"loopback_target":  {"wValue_base": 0x0600, "wIndex": 0x3300, "length": 1},
-
-    #"artist_mix":       {"wValue_base": 0x????, "wIndex": 0x????, "length": 1}, # TODO: CHECK USB DUMPS FOR CORRECT ADDRESSES
 
     "get_event":       {"wValue_base": 0x0600, "wIndex": 0x3E00, "length": 4},
 
@@ -137,3 +133,14 @@ EVO_PROFILES: dict[int, DeviceCapabilities] = {
         num_monitor_inputs=6,
     ),
 }
+
+# Map the (type, index) values of the official EVO XML to strings
+XML_LOOPBACK_SOURCE_MAPPING = {
+    ("0", "0"): "PC1+2",
+    ("0", "2"): "PC3+4",
+    ("0", "4"): "LB1+2",
+    ("1", "0"): "MM1+2",
+    ("3", "0"): "AM1+2"
+}
+
+XML_LOOPBACK_MAPPING_INV = {v: k for k, v in XML_LOOPBACK_SOURCE_MAPPING.items()}

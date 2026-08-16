@@ -1,6 +1,6 @@
 # audient-evo-python
 
-An **experimental, unofficial Python API/wrapper** for the **Audient EVO series 8 (4,16 in the works)** USB audio interfaces on Linux.
+An **experimental, unofficial Python API/wrapper** for the **Audient EVO 8 (4 might also already work)** USB audio interfaces on Linux.
 
 This library allows direct USB communication with the EVO hardware, replicating the core functionality of the official EVO Mixer software using raw control transfers.
 
@@ -9,9 +9,16 @@ This library allows direct USB communication with the EVO hardware, replicating 
 > * It is **not** affiliated with or endorsed by Audient.
 > * The kernel driver is **detached** while the app is active.
 > * Crashes or forced exits may leave the device unclaimed until replugged.
-> * Information may be incomplete or inaccurate; use at your own risk.
+> * Information may be incomplete or inaccurate; use at your own risk. \
+
+> I only own an EVO8 so I cannot dissect nor test communication for the EVO4 & EVO16, 
+with the latter likely featuring a far more complex internal structure that might differ \
+greatly from the EVO8 
+
 
 ## Features
+
+These changes do not survive disconnecting the usb cable!
 
 * Direct USB communication with EVO firmware
 * Input controls: Phantom power (48V), Gain, Mute, Mono
@@ -19,7 +26,7 @@ This library allows direct USB communication with the EVO hardware, replicating 
 * Monitor mixer routing (per input → output)
 * Sample‑rate switching (experimental)
 * Event polling support
-* Input Routing Loopback source persistently changeable
+* Change Input Routing Loopback source
 
 ## Architecture
 
@@ -67,7 +74,12 @@ evo = EvoDevice(transport)
 evo.connect_hardware()
 
 evo.set_gain(1, 40)  # gain range 0 - 100
+# or
+evo.set_gain_db(1, 7552) # gain db range -2048 - 12800
+
 evo.set_phantom(1, True)
+
+evo.disconnect_hardware()
 ```
 
 > Channel numbers are **1‑based**.

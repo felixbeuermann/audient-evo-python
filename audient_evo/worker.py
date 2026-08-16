@@ -81,7 +81,7 @@ class EvoBackgroundWorker:
 
         try:
             if category == "gain":
-                value = self.device.get_gain(ch)
+                value = self.device.get_gain_db(ch)
                 self.state.update_input(ch, "gain", value)
             elif category == "phantom":
                 value = self.device.get_phantom(ch)
@@ -93,7 +93,7 @@ class EvoBackgroundWorker:
                 value = self.device.get_mic_stereo(ch)
                 self.state.update_input(ch, "stereo_link", value)
             elif category == "volume":
-                value = self.device.get_volume(ch)
+                value = self.device.get_volume_db(ch)
                 self.state.update_output(ch, "volume", value)
             elif category == "out_mute":
                 value = self.device.get_out_mute(ch)
@@ -103,8 +103,17 @@ class EvoBackgroundWorker:
                 self.state.update_output(ch, "stereo_link", value)
             elif category == "monitor":
                 in_ch, out_ch = split_monitor_channel(ch)
-                value = self.device.get_monitor(in_ch, out_ch)
+                value = self.device.get_monitor_db(in_ch, out_ch)
                 self.state.update_monitor(in_ch, out_ch, "volume", value)
+
+            #elif category == "sample_rate":
+            #    value = self.device.get_sample_rate()
+            #    self.state.update_global("sample_rate", value)
+
+            #elif category == "loopback_left":
+            #    value = self.device.get_loopback_source()
+            #    self.state.update_global("", value)
+            # elif category == "loopback_right":
 
             logger.debug(f"Hardware Sync: {category} for Ch {ch} updated.")
         except Exception as e:

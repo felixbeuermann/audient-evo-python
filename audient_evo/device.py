@@ -5,25 +5,26 @@
 High-dial EVO 8 device API.
 This is the primary interface intended for UI and scripting.
 """
-import struct
 import time
 import threading
 import queue
 from typing import Optional, Callable
 from concurrent.futures import Future
+import math
 
 from functools import wraps
 
 from .protocol import LOOPBACK_SOURCES, SAMPLE_RATES, \
-    SAMPLE_RATE_INV, LOOPBACK_MAPPINGS_INV, LOOPBACK_TARGETS, CATEGORY_TO_HARDWARE
+    SAMPLE_RATE_INV, LOOPBACK_MAPPINGS_INV, CATEGORY_TO_HARDWARE
 from .transport import EvoUsbTransport
 from .state import EvoStateManager
 from .worker import EvoBackgroundWorker
-from .util import mon_value_to_bytes, \
-    percent_to_mon_step, bytes_to_mon_value, \
-    bytes_to_volume, is_in_range, out_step_to_percent, volume_to_bytes, \
-    percent_to_out_step, get_partner_channel, calculate_monitor_wValue,  \
-    mon_step_to_percent, gain_to_percent, percent_to_gain
+from .util import mon_step_to_bytes, \
+    percent_to_mon_step, bytes_to_mon_step, \
+    bytes_to_vol_step, is_in_percent_range, out_step_to_percent, vol_step_to_bytes, \
+    percent_to_out_step, get_partner_channel, calculate_monitor_wValue, \
+    mon_step_to_percent, gain_bytes_to_percent, percent_to_gain_bytes, encode_uac_volume, decode_uac_volume, \
+    gain_bytes_to_db, db_to_gain_bytes
 
 import logging
 
@@ -43,11 +44,19 @@ def safe_usb_transaction(func: Callable) -> Callable:
     Decorator that combines thread safety AND error handling (Try/Catch)
     for USB transactions.
     """
-
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         is_getter = func.__name__.startswith("get_")
 
+        # 1. GHOST MODE: Skip Queue
+        if getattr(self, "transport", None) and self.transport.ghost_mode:
+            try:
+                return func(self, *args, **kwargs)
+            except Exception as e:
+                logger.exception(f"Ghost-Mode-Error in '{func.__name__}': {e}")
+                return -1 if is_getter else False
+
+        # 2. USB WORKER THREAD: Skip Queue
         if getattr(threading.current_thread(), "is_usb_worker", False):
             try:
                 return func(self, *args, **kwargs)
@@ -55,6 +64,7 @@ def safe_usb_transaction(func: Callable) -> Callable:
                 logger.exception(f"Hardware-Error in '{func.__name__}': {e}")
                 return -1 if is_getter else False
 
+        # 3. USB TASK QUEUE:
         task = UsbTask(func, (self,) + args, kwargs)
         self.command_queue.put(task)
 
@@ -84,13 +94,16 @@ class EvoDevice:
     # Control ownership
     # --------------------------------------------------------
 
-    def connect_hardware(self) -> bool:     # TODO IMPLEMENT DISCONNECT METHOD
+    def connect_hardware(self, force_hardware_sync: bool = False) -> bool:
         if self.transport.is_connected() and not self.transport.ghost_mode:
             return True
         try:
             self.transport.connect()
             self.worker.start()
-            self._initialize_state_from_hardware()
+            if not force_hardware_sync and self._is_cache_populated():
+                self.push_cache_to_hardware()
+            else:
+                self._initialize_state_from_hardware()
             return True
         except Exception as e:
             logger.exception(f"Error connecting to hardware: {e}")
@@ -104,7 +117,7 @@ class EvoDevice:
         self.worker.stop()
         self.transport.release()
 
-        # ---------------- INITIALISIERUNG ----------------
+        # ---------------- INITIALISATION ----------------
 
     def _initialize_state_from_hardware(self):
         """Reads all important values live from the device at startup to populate the cache."""
@@ -115,13 +128,13 @@ class EvoDevice:
             time.sleep(0.05)
 
             for ch in range(1, self.profile.num_inputs+1):
-                self.state.update_input(ch, "gain", self.get_gain(ch))
+                self.state.update_input(ch, "gain", self.get_gain_db(ch))
                 self.state.update_input(ch, "phantom", self.get_phantom(ch))
                 self.state.update_input(ch, "mute", self.get_mic_mute(ch))
                 self.state.update_input(ch, "stereo_link", self.get_mic_stereo(ch))
 
             for ch in range (1, self.profile.num_outputs+1):
-                self.state.update_output(ch, "volume", self.get_volume(ch))
+                self.state.update_output(ch, "volume", self.get_volume_db(ch))
                 self.state.update_output(ch, "mute", self.get_out_mute(ch))
                 self.state.update_output(ch, "stereo_link", self.get_out_stereo(ch))
 
@@ -129,18 +142,10 @@ class EvoDevice:
 
             for in_ch in range(1, self.profile.num_monitor_inputs + 1):
                 for out_ch in range(1, self.profile.num_outputs + 1):
-                    self.state.update_monitor(in_ch, out_ch, "volume", self.get_monitor(in_ch, out_ch))
+                    self.state.update_monitor(in_ch, out_ch, "volume", self.get_monitor_db(in_ch, out_ch))
                     time.sleep(0.01)
 
-            loopback_source = self.get_loopback("LB1+2")
-            if loopback_source not in LOOPBACK_SOURCES:
-                loopback_source = self.get_loopback("PC1+2")
-                self.state.update_global("loopback_target", "PC1+2")
-            elif loopback_source not in LOOPBACK_SOURCES:
-                loopback_source = self.get_loopback("PC3+4")
-                self.state.update_global("loopback_target", "PC3+4")
-            else:
-                self.state.update_global("loopback_target", "LB1+2")
+            loopback_source = self.get_loopback_source()
             time.sleep(0.02)
             sample_rate =self.get_sample_rate()
 
@@ -152,6 +157,63 @@ class EvoDevice:
             logger.exception(f"Init state from hardware failed: {e}")
         return False
 
+    def push_cache_to_hardware(self) -> bool:
+        logger.info("Pushing Cache to Hardware (Wake-Up Call)...")
+
+        # 1. Globals (Loopback & Sample Rate)
+        lb_source = self.state.get_global("loopback_source")
+        if lb_source:
+            self.set_loopback_source(lb_source)
+
+        sr = self.state.get_global("sample_rate")
+        if sr and sr != -1:
+            self.set_sample_rate(sr)
+
+        artist_mix = self.state.get_global("artist_mix")
+        if artist_mix is not None:
+            self.set_artist_mix(artist_mix)
+
+        # 2. Physical Inputs
+        for ch in range(1, self.profile.num_inputs + 1):
+            gain = self.state.get_input(ch, "gain")
+            if gain not in (None, -1):
+                self.set_gain_db(ch, gain)
+
+            phantom = self.state.get_input(ch, "phantom")
+            if phantom is not None:
+                self.set_phantom(ch, phantom)
+
+            mute = self.state.get_input(ch, "mute")
+            if mute is not None:
+                self.set_mic_mute(ch, mute)
+
+            link = self.state.get_input(ch, "stereo_link")
+            if link is not None:
+                self.set_mic_stereo(ch, link)
+
+        # 3. Physical Outputs
+        for ch in range(1, self.profile.num_outputs + 1):
+            vol = self.state.get_output(ch, "volume")
+            if vol not in (None, -1):
+                self.set_volume_db(vol, ch)
+
+            mute = self.state.get_output(ch, "mute")
+            if mute is not None:
+                self.set_out_mute(mute, ch)
+
+            link = self.state.get_output(ch, "stereo_link")
+            if link is not None:
+                self.set_out_stereo(ch, link)
+
+        # 4. Sync Monitor Matrix
+        self._sync_hardware_for_outputs(list(range(1, self.profile.num_outputs + 1)))
+
+        logger.info("Cache successfully pushed to Hardware!")
+        return True
+
+    def _is_cache_populated(self) -> bool:
+        """Check if cache is filled with preset."""
+        return self.state.preset_loaded
 
     # ---------------- Internal Helper Functions ----------------
 
@@ -203,29 +265,41 @@ class EvoDevice:
     @safe_usb_transaction
     def get_phantom(self, ch: int) -> bool:
         state_byte = self._get_parameter("phantom", ch)
-        if state_byte is None:
-            logger.error(f"get_phantom: state_byte is None.")
-            return False
         return state_byte == b'\x01'
 
     @safe_usb_transaction
     def set_gain(self, ch: int, value: int) -> bool:
-        if not is_in_range(value):
+        if not is_in_percent_range(value):
             logger.error(f"set_gain: Invalid gain value {value}")
             return False
-        gain_bytes = percent_to_gain(value)
-        data = struct.pack('<h', gain_bytes)
-        wValue = 0x0100 + (ch - 1)
-        #print(f"set_gain: gain_bytes={gain_bytes}, data={data}, value={value}")     # TODO TEST 0 - 100 in a loop
-        return self.transport.ctrl_set(wValue, 0x3A00, data)
+        gain_bytes = percent_to_gain_bytes(value)
+        success = self._set_parameter("gain", gain_bytes, ch)
+        gain_db = gain_bytes_to_db(gain_bytes)
+        if success:
+            self.state.update_input(ch, "gain", gain_db)
+        return success
 
     @safe_usb_transaction
     def get_gain(self, ch: int) -> int:
         gain_bytes = self._get_parameter("gain", ch)
-        if gain_bytes and len(gain_bytes) == 2:
-            val = struct.unpack('<h', gain_bytes)[0]
-            return gain_to_percent(val)
-        return -1
+        return gain_bytes_to_percent(gain_bytes)
+
+    @safe_usb_transaction
+    def set_gain_db(self, ch: int, gain_db: int) -> bool:
+        """Gain dB Range is -2048 - 12800"""
+        if gain_db not in range(-2048, 12800):
+            logger.error(f"set_gain_db: Invalid gain value {gain_db}")
+            return False
+        gain_bytes = db_to_gain_bytes(gain_db)
+        success = self._set_parameter("gain", gain_bytes, ch)
+        if success:
+            self.state.update_input(ch, "gain", gain_db)
+        return success
+
+    @safe_usb_transaction
+    def get_gain_db(self, ch: int) -> int:
+        gain_bytes = self._get_parameter("gain", ch)
+        return gain_bytes_to_db(gain_bytes)
 
     @safe_usb_transaction
     def set_mic_mute(self, ch: int, state: bool) -> bool:
@@ -238,9 +312,6 @@ class EvoDevice:
     @safe_usb_transaction
     def get_mic_mute(self, ch: int) -> bool:
         state_byte = self._get_parameter("mic_mute", ch)
-        if state_byte is None:
-            logger.error(f"get_mic_mute: state_byte is None.")
-            return False
         return state_byte == b'\x01'
 
     @safe_usb_transaction
@@ -254,31 +325,56 @@ class EvoDevice:
     @safe_usb_transaction
     def get_mic_stereo(self, ch: int) -> bool:
         state_byte = self._get_parameter("mic_stereo", ch)
-        if state_byte is None:
-            logger.error(f"get_mic_stereo: state_byte is None.")
-            return False
         return state_byte == b'\x01'
 
     # ---------------- Output controls ----------------
 
     @safe_usb_transaction
     def set_volume(self, volume: int, out_ch: int) -> bool:
-        if not is_in_range(volume):
+        if not is_in_percent_range(volume):
             logger.error(f"set_volume: Invalid volume {volume}")
             return False
 
-        volume_bytes = volume_to_bytes(percent_to_out_step(volume))
+        volume_bytes = vol_step_to_bytes(percent_to_out_step(volume))
         success = self._set_parameter("volume", volume_bytes, ch=out_ch)
 
         if success:
-            self.state.update_output(out_ch, "volume", volume)
+            volume_db = decode_uac_volume(bytes(volume_bytes))
+            self.state.update_output(out_ch, "volume", volume_db)
 
             if self.state.get_output(out_ch, "stereo_link"):
                 partner = get_partner_channel(out_ch)
-                self.state.update_output(partner, "volume", volume)
+                self.state.update_output(partner, "volume", volume_db)
 
         return success
 
+    @safe_usb_transaction
+    def set_volume_db(self, volume: float, out_ch: int) -> bool:
+        round_vol = float(f"{volume:.2f}")
+        if -128.00 > round_vol > 0.00:
+            logger.error(f"set_volume_db: Invalid volume {round_vol}")
+            return False
+
+        volume_bytes = encode_uac_volume(round_vol)
+        success = self._set_parameter("volume", volume_bytes, ch=out_ch)
+
+        if success:
+            self.state.update_output(out_ch, "volume", round_vol)
+
+            if self.state.get_output(out_ch, "stereo_link"):
+                partner = get_partner_channel(out_ch)
+                self.state.update_output(partner, "volume", round_vol)
+
+        return success
+
+    @safe_usb_transaction
+    def get_volume_db(self, out_ch: int):
+        vol_bytes = self._get_parameter("volume", ch=out_ch)
+
+        if not vol_bytes or len(vol_bytes) < 4:
+            return -1
+
+        return float(f"{decode_uac_volume(vol_bytes):.2f}")
 
     @safe_usb_transaction
     def get_volume(self, out_ch: int) -> int:
@@ -287,7 +383,7 @@ class EvoDevice:
         if not vol_bytes or len(vol_bytes) < 4:
             return -1
 
-        volume = out_step_to_percent(bytes_to_volume(vol_bytes))    # appears to work
+        volume = out_step_to_percent(bytes_to_vol_step(vol_bytes))    # appears to work
         return volume
 
     @safe_usb_transaction
@@ -342,37 +438,98 @@ class EvoDevice:
 
     # ---------------- Monitor Mixer ----------------
 
+    def _sync_hardware_for_outputs(self, out_targets: list) -> bool:
+        """Calculates the mix (Volume vs. Mute/Solo/Pan) and sends it to the device."""
+        success = True
+
+        for o_ch in out_targets:
+            # Determine identity (Left or Right channel)
+            is_linked = self.state.get_output(o_ch, "stereo_link")
+            partner_ch = get_partner_channel(o_ch) if is_linked else o_ch
+            base_out = min(o_ch, partner_ch) if is_linked else o_ch
+            is_left = (o_ch == base_out)
+
+            any_solo = any(
+                self.state.get_monitor(x, o_ch, "solo")
+                for x in range(1, self.profile.num_monitor_inputs + 1)
+            )
+
+            for i_ch in range(1, self.profile.num_monitor_inputs + 1):
+                logical_vol_db = self.state.get_monitor(i_ch, o_ch, "volume")
+                is_muted = self.state.get_monitor(i_ch, o_ch, "mute")
+                is_solo = self.state.get_monitor(i_ch, o_ch, "solo")
+
+                # Apply panning if the output is linked
+                if is_linked and logical_vol_db not in (None, -1, -128.0):
+                    # Read panning from cache (default is 0.5 = center)
+                    pan = self.state.get_monitor(i_ch, base_out, "pan")
+                    if pan is None:
+                        pan = 0.5
+
+                    # Linear panning calculation (attenuation)
+                    mult = min(1.0, (1.0 - pan) * 2.0) if is_left else min(1.0, pan * 2.0)
+
+                    if mult <= 0.001:
+                        physical_vol_db = -128.00  # -Infinity dB / Mute
+                    else:
+                        attenuation_db = 20 * math.log10(mult)
+                        physical_vol_db = max(-128.00, logical_vol_db + attenuation_db)
+                else:
+                    physical_vol_db = logical_vol_db
+
+                # If muted, send -128 dB (UAC2 Mute) to the hardware
+                if is_muted or (any_solo and not is_solo):
+                    vol_to_send = -128.00
+                else:
+                    vol_to_send = physical_vol_db
+
+                if vol_to_send in (None, -1):
+                    continue
+
+                monitor_bytes = encode_uac_volume(vol_to_send)
+                if not self._set_parameter("monitor", monitor_bytes, i_ch, o_ch):
+                    success = False
+
+        return success
+
     @safe_usb_transaction
     def set_monitor(self, value: int, in_ch: int, out_ch: int) -> bool:
-        if not is_in_range(value):
-            logger.error(f"set_gain: Invalid gain value {value}")
+        if not is_in_percent_range(value):
             return False
-        monitor_bytes = mon_value_to_bytes(percent_to_mon_step(value))
 
+        value_db = decode_uac_volume(bytes(mon_step_to_bytes(percent_to_mon_step(value))))
+
+        in_targets = [in_ch]
         out_targets = [out_ch]
+
+        # 1. Check Output Link (Mirrors the command to the right/left ear)
         if self.state.get_output(out_ch, "stereo_link"):
             out_targets.append(get_partner_channel(out_ch))
 
-        # Determine input targets (check state for analog channels, digital are ALWAYS stereo)
-        in_targets = [in_ch]
-        if in_ch <= self.profile.num_inputs:
-            if self.state.get_input(in_ch, "stereo_link"):
-                in_targets.append(get_partner_channel(in_ch))
-        else:
-            # Channels 5-10 (PC & Loopback) are inherently fixed stereo pairs
+        # 2. Check Input Link (If Mic 1+2 are linked, include Mic 2 as well)
+        if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
+            in_targets.append(get_partner_channel(in_ch))
+        elif in_ch > self.profile.num_inputs:
+            # Digital channels (PC / Loopback) are typically stereo pairs by default
             in_targets.append(get_partner_channel(in_ch))
 
-        # 3. Process the complete routing block (1x1, 1x2, 2x1, or 2x2 matrix)
-        success_overall = True
-        for i_ch in in_targets:
-            for o_ch in out_targets:
-                success = self._set_parameter("monitor", monitor_bytes, i_ch, o_ch)
-                if success:
-                    self.state.update_monitor(i_ch, o_ch, "volume", value)
-                else:
-                    success_overall = False
+        # 3. Artist Mix Mirroring (1 to 3, 2 to 4)
+        if not self.state.get_global("artist_mix") and any(c in (1, 2) for c in out_targets):
+            if out_ch + 2 <= self.profile.num_outputs:
+                for c in list(out_targets):
+                    if c in (1, 2):
+                        out_targets.append(c + 2)
 
-        return success_overall
+        out_targets = list(set(out_targets))
+        in_targets = list(set(in_targets))
+
+        # Update cache with the master volume
+        for i in in_targets:
+            for o in out_targets:
+                self.state.update_monitor(i, o, "volume", value_db)
+
+        # Synchronize hardware
+        return self._sync_hardware_for_outputs(out_targets)
 
     @safe_usb_transaction
     def get_monitor(self, in_ch: int, out_ch: int) -> int:
@@ -381,28 +538,158 @@ class EvoDevice:
         if monitor_vol_bytes == b'\x00\x00\xff\xff':
             return 0
         else:
-            monitor_vol = mon_step_to_percent(bytes_to_mon_value(monitor_vol_bytes))
+            monitor_vol = mon_step_to_percent(bytes_to_mon_step(monitor_vol_bytes))
         return monitor_vol
 
     @safe_usb_transaction
-    def set_monitor_bridge(self, enable: bool) -> bool:
-        data = b'\x01' if enable else b'\x00'
-        return self._set_parameter("monitor_bridge", data)
+    def set_monitor_db(self, value_db: float, in_ch: int, out_ch: int) -> bool:
+        in_targets = [in_ch]
+        out_targets = [out_ch]
+
+        # 1. Check Output Link (Mirrors the command to the right/left ear)
+        if self.state.get_output(out_ch, "stereo_link"):
+            out_targets.append(get_partner_channel(out_ch))
+
+        # 2. Check Input Link (If Mic 1+2 are linked, include Mic 2 as well)
+        if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
+            in_targets.append(get_partner_channel(in_ch))
+        elif in_ch > self.profile.num_inputs:
+            # Digital channels (PC / Loopback) are typically stereo pairs by default
+            in_targets.append(get_partner_channel(in_ch))
+
+        # 3. Artist Mix Mirroring (1 to 3, 2 to 4)
+        if not self.state.get_global("artist_mix") and any(c in (1, 2) for c in out_targets):
+            for c in list(out_targets):
+                if c in (1, 2):
+                    out_targets.append(c + 2)
+
+        out_targets = list(set(out_targets))
+        in_targets = list(set(in_targets))
+
+        # Update cache with the master volume
+        for i in in_targets:
+            for o in out_targets:
+                self.state.update_monitor(i, o, "volume", float(f"{value_db:.2f}"))
+
+        # Synchronize hardware
+        return self._sync_hardware_for_outputs(out_targets)
 
     @safe_usb_transaction
-    def get_monitor_bridge(self) -> bool:
-        mon_bridge_bytes = self._get_parameter("monitor_bridge") #TODO: THIS IS VERY EXPERIMENTAL
-        return mon_bridge_bytes == b'\x01'
+    def get_monitor_db(self, in_ch: int, out_ch: int) -> float:
+        monitor_vol_bytes = self._get_parameter("monitor", in_ch, out_ch)
+
+        if monitor_vol_bytes == b'\x00\x00\xff\xff':
+            return 0
+        else:
+            monitor_db = decode_uac_volume(monitor_vol_bytes)
+        return float(f"{monitor_db:.2f}")
+
+    @safe_usb_transaction
+    def set_monitor_mute(self, state: bool, in_ch: int, out_ch: int) -> bool:
+        # 1. Input pair (if Stereo Link is active)
+        in_targets = [in_ch]
+        if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
+            in_targets.append(get_partner_channel(in_ch))
+        elif in_ch > self.profile.num_inputs:
+            in_targets.append(get_partner_channel(in_ch))  # Digital immer Stereo
+
+        # 2. Output pair (A mix is ALWAYS L+R)
+        base_out = out_ch if out_ch % 2 != 0 else out_ch - 1
+        out_targets = [base_out, base_out + 1]
+
+        # 3. Artist Mix Mirroring
+        if not self.state.get_global("artist_mix") and out_targets == [1, 2]:
+            out_targets.extend([3, 4])
+
+        # 4. Update state for the entire channel strip
+        for i in set(in_targets):
+            for o in set(out_targets):
+                self.state.update_monitor(i, o, "mute", state)
+
+        return self._sync_hardware_for_outputs(list(set(out_targets)))
+
+    @safe_usb_transaction
+    def set_monitor_solo(self, state: bool, in_ch: int, out_ch: int) -> bool:
+        in_targets = [in_ch]
+        if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
+            in_targets.append(get_partner_channel(in_ch))
+        elif in_ch > self.profile.num_inputs:
+            in_targets.append(get_partner_channel(in_ch))
+
+        base_out = out_ch if out_ch % 2 != 0 else out_ch - 1
+        out_targets = [base_out, base_out + 1]
+
+        if not self.state.get_global("artist_mix") and out_targets == [1, 2]:
+            out_targets.extend([3, 4])
+
+        for i in set(in_targets):
+            for o in set(out_targets):
+                self.state.update_monitor(i, o, "solo", state)
+
+        return self._sync_hardware_for_outputs(list(set(out_targets)))
+
+    def get_monitor_mute(self, in_ch: int, out_ch: int) -> bool:
+        return self.state.get_monitor(in_ch, out_ch, "mute")
+
+    def get_monitor_solo(self, in_ch: int, out_ch: int) -> bool:
+        return self.state.get_monitor(in_ch, out_ch, "solo")
+
+    @safe_usb_transaction
+    def set_monitor_pan(self, pan: float, in_ch: int, out_ch: int) -> bool:
+        """
+        Set the panning (0.0 = Left, 0.5 = Center, 1.0 = Right).
+        """
+        if not (0.0 <= pan <= 1.0):
+            return False
+
+        out_targets = [out_ch]
+
+        if self.state.get_output(out_ch, "stereo_link"):
+            out_targets.append(get_partner_channel(out_ch))
+
+        if not self.state.get_global("artist_mix") and any(c in (1, 2) for c in out_targets):
+            for c in list(out_targets):
+                if c in (1, 2):
+                    out_targets.append(c + 2)
+
+        out_targets = list(set(out_targets))
+
+        # Store pan in cache for all associated outputs
+        for o in out_targets:
+            self.state.update_monitor(in_ch, o, "pan", pan)
+
+        # Panning changes the actual volume, so it has to sync the hardware
+        return self._sync_hardware_for_outputs(out_targets)
+
+    def get_monitor_pan(self, in_ch: int, out_ch: int) -> float:
+        return self.state.get_monitor(in_ch, out_ch, "pan")
+
+    def set_artist_mix(self, enable: bool) -> bool:
+        self.state.update_global("artist_mix", enable)
+
+        if not enable:
+            if self.profile.num_outputs >= 4:
+                # Artist Mix off: overwrite 3+4 with 1+2 in state
+                for in_ch in range(1, self.profile.num_monitor_inputs + 1):
+                    for src, dst in [(1, 3), (2, 4)]:
+                        vol = self.state.get_monitor(in_ch, src, "volume")
+                        if vol not in (None, -1):
+                            self.state.update_monitor(in_ch, dst, "volume", vol)
+                            self.state.update_monitor(in_ch, dst, "mute", self.state.get_monitor(in_ch, src, "mute"))
+                            self.state.update_monitor(in_ch, dst, "solo", self.state.get_monitor(in_ch, src, "solo"))
+
+                self._sync_hardware_for_outputs([3, 4])
+        return True
+
+    def get_artist_mix(self) -> bool:
+        return self.state.get_global("artist_mix")
 
     # ---------------- Loopback ----------------
 
     @safe_usb_transaction
-    def get_loopback(self, loopback_target: str) -> str:
-        if loopback_target not in LOOPBACK_TARGETS:
-            raise ValueError(f"Invalid loopback target. Supported: {list(LOOPBACK_TARGETS.keys())}")
-
+    def get_loopback_source(self) -> str:
         # Unpack addresses from the dictionary
-        wValue_left, wValue_right = LOOPBACK_TARGETS[loopback_target]
+        wValue_left, wValue_right = 0x0604, 0x0605
 
         # Query values from the hardware
         loopback_byte_left = self.transport.ctrl_get(wValue_left, 0x3300, length=1)
@@ -411,14 +698,20 @@ class EvoDevice:
         return LOOPBACK_MAPPINGS_INV.get((loopback_byte_left, loopback_byte_right), "Unknown loopback group")
 
     @safe_usb_transaction
-    def set_loopback(self, loopback_target: str, loopback_source: str) -> bool:
+    def get_loopback_source_left(self) -> bytes:
+        return self.transport.ctrl_get(0x0604, 0x3300, length=1)
+
+    @safe_usb_transaction
+    def get_loopback_source_right(self) -> bytes:
+        return self.transport.ctrl_get(0x0605, 0x3300, length=1)
+
+    @safe_usb_transaction
+    def set_loopback_source(self, loopback_source: str) -> bool:
         if loopback_source not in LOOPBACK_SOURCES:
             raise ValueError(f"Invalid loopback source. Supported: {list(LOOPBACK_SOURCES.keys())}")
-        if loopback_target not in LOOPBACK_TARGETS:
-            raise ValueError(f"Invalid loopback target. Supported: {list(LOOPBACK_TARGETS.keys())}")
 
         # Cleanly unpack addresses and data bytes from the dictionaries
-        wValue_left, wValue_right = LOOPBACK_TARGETS[loopback_target]
+        wValue_left, wValue_right = 0x0604, 0x0605
         data_left, data_right = LOOPBACK_SOURCES[loopback_source]
 
         # Write both channels
@@ -428,7 +721,6 @@ class EvoDevice:
 
         if success:
             self.state.update_global("loopback_source", loopback_source)
-            self.state.update_global("loopback_target", loopback_target)
 
         return success
 
@@ -436,7 +728,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_sample_rate(self) -> int:
-        sr_bytes = self.transport.ctrl_get(0x0100,0x2900, 4) #self._get_parameter("sample_rate")
+        sr_bytes = self.transport.ctrl_get(0x0100,0x2900, 4)
         return SAMPLE_RATE_INV.get(sr_bytes, -1)
 
     @safe_usb_transaction
