@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 name = "audient-evo-linux"
 version = "1.0.0"
 authors = [
-  { name="Felix Beuermann", email="felixbeuermann@web.de" },
+  { name = "Felix Beuermann", email = "felixbeuermann@web.de" }
 ]
 description = "An unofficial Python API/wrapper for the Audient EVO series on Linux."
 readme = "README.md"
