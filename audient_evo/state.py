@@ -59,6 +59,10 @@ class EvoStateManager:
         self.capabilities = capabilities
         self.preset_loaded = False
 
+        # Callback-Registry (Dictionary, that stores lists of functions)
+        # z.B. {"gain": [func1, func2], "mute": [func3]}
+        self._callbacks = {}
+
         # --- Inputs (1-4) ---
         self.inputs = {ch: InputState() for ch in range(1, self.capabilities.num_inputs+1)}
 
@@ -108,42 +112,73 @@ class EvoStateManager:
         # --- Global State ---
         self.globals = GlobalState()
 
+    def bind(self, event_key: str, callback: callable):
+        """Register a callback for an event (i.e. 'gain')."""
+        if event_key not in self._callbacks:
+            self._callbacks[event_key] = []
+        if callback not in self._callbacks[event_key]:
+            self._callbacks[event_key].append(callback)
+
+    def unbind(self, event_key: str, callback: callable):
+        """Unregister a callback from an event."""
+        if event_key in self._callbacks and callback in self._callbacks[event_key]:
+            self._callbacks[event_key].remove(callback)
+
+    def _fire_event(self, event_key: str, *args, **kwargs):
+        """Invoke all callbacks registered for an event."""
+        if event_key in self._callbacks:
+            for callback in self._callbacks[event_key]:
+                try:
+                    callback(*args, **kwargs)
+                except Exception as e:
+                    logger.error(f"Error in callback for event_key:'{event_key}': {e}")
+
     # ---------------- INPUTS ----------------
 
     def update_input(self, ch: int, key: str, value) -> None:
-        """Updates a specific value of an input channel."""
-        if ch in self.inputs:
-            if hasattr(self.inputs[ch], key):
+        """Update a value of an input channel in cache."""
+        if ch in self.inputs and hasattr(self.inputs[ch], key):
+            old_val = getattr(self.inputs[ch], key)
+            if old_val != value: # Only update if the value is new
                 setattr(self.inputs[ch], key, value)
-            else:
-                logger.warning(f"Unknown input attribute: {key}")
+                self._fire_event(key, ch, value)  # Fires event="gain", ch=1, value=45
+        else:
+            logger.warning(f"Unknown input attribute: {key}")
 
     def get_input(self, ch: int, key: str):
-        """Retrieves a value from the input cache."""
-        if ch in self.inputs:
+        """Retrieve a value from the input cache."""
+        if ch in self.inputs and hasattr(self.inputs[ch], key):
             return getattr(self.inputs[ch], key, None)
         return None
 
     # ---------------- OUTPUTS ----------------
 
     def update_output(self, out_ch: int, key: str, value) -> None:
-        if out_ch in self.outputs:
-            if hasattr(self.outputs[out_ch], key):
+        """Update a value of an output channel in cache."""
+        if out_ch in self.outputs and hasattr(self.outputs[out_ch], key):
+            old_val = getattr(self.outputs[out_ch], key)
+            if old_val != value:
                 setattr(self.outputs[out_ch], key, value)
-            else:
-                logger.warning(f"Unknown output attribute: {key}")
+                self._fire_event(key, out_ch, value)
+        else:
+            logger.warning(f"Unknown output attribute: {key}")
 
     def get_output(self, out_ch: int, key: str):
-        if out_ch in self.outputs:
+        """Retrieve a value from the output cache."""
+        if out_ch in self.outputs and hasattr(self.outputs[out_ch], key):
             return getattr(self.outputs[out_ch], key, None)
         return None
 
     # ---------------- MONITOR ----------------
 
     def update_monitor(self, in_ch: int, out_ch: int, key: str, value):
+        """Update a value of a monitor channel in cache."""
         node = self.matrix.get((in_ch, out_ch))
         if node and hasattr(node, key):
-            setattr(node, key, value)
+            old_val = getattr(node, key)
+            if old_val != value:
+                setattr(node, key, value)
+                self._fire_event(f"monitor_{key}", in_ch, out_ch, value)
 
     def get_monitor(self, in_ch: int , out_ch: int, key: str):
         node = self.matrix.get((in_ch, out_ch))
@@ -154,6 +189,7 @@ class EvoStateManager:
     # ---------------- GLOBALS ----------------
 
     def update_global(self, key: str, value) -> None:
+        """Update a value of a global attribute in cache."""
         if hasattr(self.globals, key):
             setattr(self.globals, key, value)
         else:
@@ -169,64 +205,83 @@ class EvoStateManager:
         Prints the entire current cache state (StateManager)
         in a clearly formatted way to the terminal.
         """
+        # Define column width for the matrix (space for V, P, M, S)
+        col_width = 34
+        # Calculate total width: 10 character offset + width of columns
+        separator_len = 10 + (col_width * self.capabilities.num_outputs)
 
-        print("\n" + "=" * 55)
-        print("🎛️   EVO 8 CURRENT STATE CACHE   🎛️".center(50))
-        print("=" * 55)
+        print("\n" + "=" * separator_len)
+        print("🎛️ EVO 8 CURRENT STATE CACHE 🎛️".center(separator_len))
+        print("=" * separator_len)
 
         # --- Globals ---
         print("\n[ GLOBALS ]")
         sr = self.get_global('sample_rate')
         lb_source = self.get_global('loopback_source')
         artist_mix = self.get_global('artist_mix')
-        print(f"  Sample Rate : {sr if sr != -1 else 'Unknown'} Hz")
-        print(f"  Loopback_source    : {lb_source if lb_source else 'Not set'}")
-        print(f"  Artist_mix         : {artist_mix if artist_mix is not None else 'Not set'}")
+
+        print(f"  Sample Rate    : {sr if sr not in (None, -1) else 'Unknown'} Hz")
+        print(f"  Loopback_source: {lb_source if lb_source else 'Not set'}")
+
+        # Read Artist Mix safely (may be None)
+        if artist_mix is None:
+            am_str = 'Not set'
+        else:
+            am_str = 'ON' if artist_mix else 'OFF'
+        print(f"  Artist_mix     : {am_str}")
 
         # --- Inputs ---
         print(f"\n[ INPUTS (1-{self.capabilities.num_inputs}) ]")
         for ch, inp in self.inputs.items():
-            # Formatting: Values right-aligned for a clean table
-            gain_str = f"{inp.gain:>3} dB" if inp.gain not in (None, -1) else "N/A "
+            # Formatting: Raw Gain (e.g., -2048) needs slightly more space
+            gain_str = f"{inp.gain:>5}" if inp.gain not in (None, -1) else "N/A  "
             print(f"  IN {ch} | Gain: {gain_str} | 48V: {'ON' if inp.phantom else 'OFF':<3} | "
                   f"Mute: {'ON' if inp.mute else 'OFF':<3} | Link: {'ON' if inp.stereo_link else 'OFF':<3}")
 
         # --- Outputs ---
         print(f"\n[ OUTPUTS (1-{self.capabilities.num_outputs}) ]")
         for ch, out in self.outputs.items():
-            vol_str = f"{out.volume:.2f} dB" if out.volume not in (None, -1) else "N/A "
-            print(f"  OUT {ch}| Vol: {vol_str}  | Mute: {'ON' if out.mute else 'OFF':<3} | "
+            vol_str = f"{out.volume:.2f} dB" if out.volume not in (None, -1) else "N/A     "
+            print(f"  OUT {ch}| Vol: {vol_str:>9} | Mute: {'ON' if out.mute else 'OFF':<3} | "
                   f"Link: {'ON' if out.stereo_link else 'OFF':<3}")
 
         # --- Monitor Matrix ---
-        print(f"\n[ MONITOR MATRIX ({self.capabilities.num_monitor_inputs} Inputs -> {self.capabilities.num_outputs} Outputs) ]")
-        # Header
-        print(" " * 10 + " ".join([f"OUT {i + 1}".ljust(6) for i in range(self.capabilities.num_outputs)]))
-        print(" " * 10 + "-" * 25)
+        print(
+            f"\n[ MONITOR MATRIX ({self.capabilities.num_monitor_inputs} Inputs -> {self.capabilities.num_outputs} Outputs) ]")
+
+        # Build header dynamically
+        header_row = " " * 10 + "".join(
+            [f"OUT {i + 1}".center(col_width) for i in range(self.capabilities.num_outputs)])
+        print(header_row)
+        print(" " * 10 + "-" * (col_width * self.capabilities.num_outputs))
 
         # loop over the 10 internal inputs (including PC and Loopback)
-        for in_ch in range(1, self.capabilities.num_monitor_inputs+1):
-            row_str = f" IN {in_ch:2} |"
-            for out_ch in range(1, self.capabilities.num_outputs+1):
-                # Get volume out of cache
+        for in_ch in range(1, self.capabilities.num_monitor_inputs + 1):
+            row_str = f"  IN {in_ch:2} |"
+            for out_ch in range(1, self.capabilities.num_outputs + 1):
+                # Retrieve values defensively from the cache
                 vol = self.get_monitor(in_ch, out_ch, "volume")
+                pan = self.get_monitor(in_ch, out_ch, "pan")
+                mute = self.get_monitor(in_ch, out_ch, "mute")
+                solo = self.get_monitor(in_ch, out_ch, "solo")
 
-                # Defensive formating
-                if vol is None or vol == -1:
-                    display = " N/A  "
-                else:
-                    display = f"{vol:.2f} dB "
+                # Defensive formatting for each parameter
+                vol_str = f"{vol:.2f}" if vol not in (None, -1) else "N/A"
+                pan_str = f"{pan:.2f}" if pan is not None else "N/A"
+                m_str = "ON" if mute else "OFF"
+                s_str = "ON" if solo else "OFF"
 
-                row_str += display
+                # Build cell (V = Volume, P = Pan, M = Mute, S = Solo)
+                cell = f"V:{vol_str:>7} P:{pan_str:>4} M:{m_str:<3} S:{s_str:<3}"
+
+                # Center cell and add separator
+                row_str += cell.center(col_width - 1) + "|"
             print(row_str)
 
-        print("\n" + "=" * 55 + "\n")
+        print("\n" + "=" * separator_len + "\n")
 
     def import_from_evo_xml(self, xml_string: str) -> bool:
-        """
-        Loads an official EVO XML preset file, and populates the state cache.
-        """
-
+        """Loads an official EVO XML preset file, and populates the state cache."""
         try:
             root = ET.fromstring(xml_string)
 

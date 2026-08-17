@@ -269,6 +269,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def set_gain(self, ch: int, value: int) -> bool:
+        """Set Gain in % (0 to 100)"""
         if not is_in_percent_range(value):
             logger.error(f"set_gain: Invalid gain value {value}")
             return False
@@ -281,12 +282,13 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_gain(self, ch: int) -> int:
+        """Get Gain in % (0 to 100)"""
         gain_bytes = self._get_parameter("gain", ch)
         return gain_bytes_to_percent(gain_bytes)
 
     @safe_usb_transaction
     def set_gain_db(self, ch: int, gain_db: int) -> bool:
-        """Gain dB Range is -2048 - 12800"""
+        """Set Gain in dB (-2048 to 12800)"""
         if gain_db not in range(-2048, 12800):
             logger.error(f"set_gain_db: Invalid gain value {gain_db}")
             return False
@@ -298,6 +300,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_gain_db(self, ch: int) -> int:
+        """Get Gain in dB (-2048 to 12800)"""
         gain_bytes = self._get_parameter("gain", ch)
         return gain_bytes_to_db(gain_bytes)
 
@@ -331,6 +334,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def set_volume(self, volume: int, out_ch: int) -> bool:
+        """Set Output Volume in % (0 to 100)"""
         if not is_in_percent_range(volume):
             logger.error(f"set_volume: Invalid volume {volume}")
             return False
@@ -349,7 +353,19 @@ class EvoDevice:
         return success
 
     @safe_usb_transaction
+    def get_volume(self, out_ch: int) -> int:
+        """Get Output Volume in % (0 to 100)"""
+        vol_bytes = self._get_parameter("volume", ch=out_ch)
+
+        if not vol_bytes or len(vol_bytes) < 4:
+            return -1
+
+        volume = out_step_to_percent(bytes_to_vol_step(vol_bytes))    # appears to work
+        return volume
+
+    @safe_usb_transaction
     def set_volume_db(self, volume: float, out_ch: int) -> bool:
+        """Set Output Volume in dB (-128.00 to 0.00)"""
         round_vol = float(f"{volume:.2f}")
         if -128.00 > round_vol > 0.00:
             logger.error(f"set_volume_db: Invalid volume {round_vol}")
@@ -369,22 +385,13 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_volume_db(self, out_ch: int):
+        """Get Output Volume in dB (-128.00 to 0.00)"""
         vol_bytes = self._get_parameter("volume", ch=out_ch)
 
         if not vol_bytes or len(vol_bytes) < 4:
             return -1
 
         return float(f"{decode_uac_volume(vol_bytes):.2f}")
-
-    @safe_usb_transaction
-    def get_volume(self, out_ch: int) -> int:
-        vol_bytes = self._get_parameter("volume", ch=out_ch)
-
-        if not vol_bytes or len(vol_bytes) < 4:
-            return -1
-
-        volume = out_step_to_percent(bytes_to_vol_step(vol_bytes))    # appears to work
-        return volume
 
     @safe_usb_transaction
     def set_out_mute(self, state: bool, out_ch: int) -> bool:
@@ -494,6 +501,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def set_monitor(self, value: int, in_ch: int, out_ch: int) -> bool:
+        """Set Monitor Volume in % (0 to 100)"""
         if not is_in_percent_range(value):
             return False
 
@@ -533,6 +541,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_monitor(self, in_ch: int, out_ch: int) -> int:
+        """Get Monitor Volume in % (0 to 100)"""
         monitor_vol_bytes = self._get_parameter("monitor", in_ch, out_ch)
 
         if monitor_vol_bytes == b'\x00\x00\xff\xff':
@@ -543,6 +552,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def set_monitor_db(self, value_db: float, in_ch: int, out_ch: int) -> bool:
+        """Set Monitor Volume in dB (-128.00 to +8.00)"""
         in_targets = [in_ch]
         out_targets = [out_ch]
 
@@ -576,6 +586,7 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_monitor_db(self, in_ch: int, out_ch: int) -> float:
+        """Get Monitor Volume in dB (-128.00 to +8.00)"""
         monitor_vol_bytes = self._get_parameter("monitor", in_ch, out_ch)
 
         if monitor_vol_bytes == b'\x00\x00\xff\xff':
@@ -687,26 +698,8 @@ class EvoDevice:
     # ---------------- Loopback ----------------
 
     @safe_usb_transaction
-    def get_loopback_source(self) -> str:
-        # Unpack addresses from the dictionary
-        wValue_left, wValue_right = 0x0604, 0x0605
-
-        # Query values from the hardware
-        loopback_byte_left = self.transport.ctrl_get(wValue_left, 0x3300, length=1)
-        loopback_byte_right = self.transport.ctrl_get(wValue_right, 0x3300, length=1)
-
-        return LOOPBACK_MAPPINGS_INV.get((loopback_byte_left, loopback_byte_right), "Unknown loopback group")
-
-    @safe_usb_transaction
-    def get_loopback_source_left(self) -> bytes:
-        return self.transport.ctrl_get(0x0604, 0x3300, length=1)
-
-    @safe_usb_transaction
-    def get_loopback_source_right(self) -> bytes:
-        return self.transport.ctrl_get(0x0605, 0x3300, length=1)
-
-    @safe_usb_transaction
     def set_loopback_source(self, loopback_source: str) -> bool:
+        """Set Stereo Loopback Source via a string"""
         if loopback_source not in LOOPBACK_SOURCES:
             raise ValueError(f"Invalid loopback source. Supported: {list(LOOPBACK_SOURCES.keys())}")
 
@@ -723,6 +716,28 @@ class EvoDevice:
             self.state.update_global("loopback_source", loopback_source)
 
         return success
+
+    @safe_usb_transaction
+    def get_loopback_source(self) -> str:
+        """Get Stereo Loopback Source as string"""
+        # Unpack addresses from the dictionary
+        wValue_left, wValue_right = 0x0604, 0x0605
+
+        # Query values from the hardware
+        loopback_byte_left = self.transport.ctrl_get(wValue_left, 0x3300, length=1)
+        loopback_byte_right = self.transport.ctrl_get(wValue_right, 0x3300, length=1)
+
+        return LOOPBACK_MAPPINGS_INV.get((loopback_byte_left, loopback_byte_right), "Unknown loopback group")
+
+    @safe_usb_transaction
+    def get_loopback_source_left(self) -> bytes:
+        """Get Left Loopback Source as hardware bytes"""
+        return self.transport.ctrl_get(0x0604, 0x3300, length=1)
+
+    @safe_usb_transaction
+    def get_loopback_source_right(self) -> bytes:
+        """Get Right Loopback Source as hardware bytes"""
+        return self.transport.ctrl_get(0x0605, 0x3300, length=1)
 
     # ---------------- Sample Rate ----------------
 
@@ -744,9 +759,11 @@ class EvoDevice:
 
     @safe_usb_transaction
     def event_listen(self) -> Optional[bytes]:
+        """Get Event from hardware buffer-stack"""
         return self.transport.ctrl_get(0x0600, 0x3E00, 4, 500)
 
     def event_changed(self, new_state: bytes) -> bool:
+        """Check if a new event occurred"""
         if new_state != self._last_state:
             self._last_state = new_state
             return True
