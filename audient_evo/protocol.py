@@ -41,7 +41,7 @@ SAMPLE_RATES = {
     96000: b'\x00\x77\x01\x00'
 }
 
-SAMPLE_RATE_INV = {v: k for k, v in SAMPLE_RATES.items()}
+SAMPLE_RATES_INV = {v: k for k, v in SAMPLE_RATES.items()}
 
 LOOPBACK_SOURCES = {
     "PC1+2": (b'\x06', b'\x07'),
@@ -63,7 +63,7 @@ CATEGORY_TO_HARDWARE = {
     "phantom":          {"wValue_base": 0x0000, "wIndex": 0x3A00, "length": 1},
     "gain":             {"wValue_base": 0x0100, "wIndex": 0x3A00, "length": 2},
     "mic_mute":         {"wValue_base": 0x0200, "wIndex": 0x3A00, "length": 1},
-    "mic_stereo":         {"wValue_base": 0x0300, "wIndex": 0x3A00, "length": 1},
+    "mic_stereo":       {"wValue_base": 0x0300, "wIndex": 0x3A00, "length": 1},
     
     "volume":           {"wValue_base": 0x0000, "wIndex": 0x3B00, "length": 4},
     "out_mute":         {"wValue_base": 0x0100, "wIndex": 0x3B00, "length": 1},
@@ -72,9 +72,11 @@ CATEGORY_TO_HARDWARE = {
     "monitor":          {"wValue_base": 0x0100, "wIndex": 0x3C00, "length": 4},
 
     "sample_rate":      {"wValue_base": 0x0100, "wIndex": 0x2900, "length": 4},
-    #"loopback_target":  {"wValue_base": 0x0600, "wIndex": 0x3300, "length": 1},
 
-    "get_event":       {"wValue_base": 0x0600, "wIndex": 0x3E00, "length": 4},
+    "loopback_left":    {"wValue_base": 0x0604, "wIndex": 0x3300, "length": 1},
+    "loopback_right":   {"wValue_base": 0x0605, "wIndex": 0x3300, "length": 1},
+
+    "get_event":        {"wValue_base": 0x0600, "wIndex": 0x3E00, "length": 4},
 
 
     }
@@ -94,12 +96,15 @@ HARDWARE_TO_CATEGORY = {
     # Unit 60 (Monitor)
     (60, 0x01): "monitor",
 
-    # Unit 2 (sample rate)
+    # Unit 41 (sample rate)
     (41, 0x01): "sample_rate",
 
     # Unit 51 (loopback)
     (51, 0x0604): "loopback_left", # this is the left loopback (LB 1) Target channel (look at LOOPBACK_TARGETS above)
-    (51, 0x0605): "loopback_right" # this is the right loopback (LB 2) Target channel
+    (51, 0x0605): "loopback_right", # this is the right loopback (LB 2) Target channel
+
+    # Unit 62 (event_buffer)
+    (62, 0x0600): "get_event"
 }
 
 @dataclass(frozen=True)

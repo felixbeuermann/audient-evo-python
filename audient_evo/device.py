@@ -5,28 +5,26 @@
 High-dial EVO 8 device API.
 This is the primary interface intended for UI and scripting.
 """
+
+import math
 import time
+import logging
 import threading
 import queue
 from typing import Optional, Callable
 from concurrent.futures import Future
-import math
-
 from functools import wraps
-
 from .protocol import LOOPBACK_SOURCES, SAMPLE_RATES, \
-    SAMPLE_RATE_INV, LOOPBACK_MAPPINGS_INV, CATEGORY_TO_HARDWARE
+    SAMPLE_RATES_INV, LOOPBACK_MAPPINGS_INV, CATEGORY_TO_HARDWARE
 from .transport import EvoUsbTransport
 from .state import EvoStateManager
 from .worker import EvoBackgroundWorker
 from .util import mon_step_to_bytes, \
-    percent_to_mon_step, bytes_to_mon_step, \
-    bytes_to_vol_step, is_in_percent_range, out_step_to_percent, vol_step_to_bytes, \
+    percent_to_mon_step, bytes_to_mon_step, mon_step_to_percent, \
+    is_in_percent_range, vol_step_to_bytes, bytes_to_vol_percent, \
     percent_to_out_step, get_partner_channel, calculate_monitor_wValue, \
-    mon_step_to_percent, gain_bytes_to_percent, percent_to_gain_bytes, encode_uac_volume, decode_uac_volume, \
-    gain_bytes_to_db, db_to_gain_bytes
-
-import logging
+    gain_bytes_to_percent, percent_to_gain_bytes, gain_bytes_to_db, db_to_gain_bytes, \
+    encode_uac_volume, decode_uac_volume
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,8 +39,9 @@ class UsbTask:
 
 def safe_usb_transaction(func: Callable) -> Callable:
     """
-    Decorator that combines thread safety AND error handling (Try/Catch)
-    for USB transactions.
+    Decorator that ensures thread safety and robust error handling for USB transactions.
+
+    Routes the transaction either directly or through a thread-safe queue depending on the calling thread and ghost mode status.
     """
     @wraps(func)
     def wrapper(self, *args, **kwargs):
@@ -67,7 +66,6 @@ def safe_usb_transaction(func: Callable) -> Callable:
         # 3. USB TASK QUEUE:
         task = UsbTask(func, (self,) + args, kwargs)
         self.command_queue.put(task)
-
         try:
             return task.future.result(timeout=2.0)
         except Exception as e:
@@ -78,7 +76,6 @@ def safe_usb_transaction(func: Callable) -> Callable:
 
 class EvoDevice:
     """High-dial user-facing device API."""
-
     def __init__(self, transport: EvoUsbTransport):
         self._last_state: Optional[bytes] = None
         self.last_error: Optional[str] = None
@@ -95,13 +92,21 @@ class EvoDevice:
     # --------------------------------------------------------
 
     def connect_hardware(self, force_hardware_sync: bool = False) -> bool:
+        """
+        Connects to the hardware device and synchronizes its state.
+        Args:
+            force_hardware_sync (bool): If True, forces a fresh initialization from the
+                hardware instead of using the local state cache.
+        Returns:
+            bool: True if the connection and synchronization were successful, False otherwise.
+        """
         if self.transport.is_connected() and not self.transport.ghost_mode:
             return True
         try:
             self.transport.connect()
             self.worker.start()
             if not force_hardware_sync and self._is_cache_populated():
-                self.push_cache_to_hardware()
+                self._push_cache_to_hardware()
             else:
                 self._initialize_state_from_hardware()
             return True
@@ -111,7 +116,11 @@ class EvoDevice:
             return False
 
     def disconnect_hardware(self) -> None:
-        """Stop Communication, give back to ALSA and turn on Ghost Mode."""
+        """
+        Stops communication with the hardware and enables Ghost Mode.
+
+        Releases the USB interface back to the ALSA driver and stops the background worker.
+        """
         if self.transport.ghost_mode: return
         logger.info("Giving Hardware back to ALSA (Ghost Mode)...")
         self.worker.stop()
@@ -120,11 +129,11 @@ class EvoDevice:
         # ---------------- INITIALISATION ----------------
 
     def _initialize_state_from_hardware(self):
-        """Reads all important values live from the device at startup to populate the cache."""
+        """Reads essential parameters directly from the device to populate the initial cache."""
         logger.info("Synchronizing initial state from hardware...")
         success = True
         try:
-            self.set_monitor(0, 10, 20)  # Wakeup monitor by calling out of range monitor address
+            self.set_monitor(10, 20, 0)  # Wakeup monitor by calling out of range monitor address
             time.sleep(0.05)
 
             for ch in range(1, self.profile.num_inputs+1):
@@ -157,9 +166,14 @@ class EvoDevice:
             logger.exception(f"Init state from hardware failed: {e}")
         return False
 
-    def push_cache_to_hardware(self) -> bool:
-        logger.info("Pushing Cache to Hardware (Wake-Up Call)...")
+    def _push_cache_to_hardware(self) -> bool:
+        """
+        Applies the current state cache to the hardware device to wake it up.
 
+        Returns:
+            bool: True if the cache was successfully pushed to the hardware.
+        """
+        logger.info("Pushing Cache to Hardware (Wake-Up Call)...")
         # 1. Globals (Loopback & Sample Rate)
         lb_source = self.state.get_global("loopback_source")
         if lb_source:
@@ -195,11 +209,11 @@ class EvoDevice:
         for ch in range(1, self.profile.num_outputs + 1):
             vol = self.state.get_output(ch, "volume")
             if vol not in (None, -1):
-                self.set_volume_db(vol, ch)
+                self.set_volume_db(ch, vol)
 
             mute = self.state.get_output(ch, "mute")
             if mute is not None:
-                self.set_out_mute(mute, ch)
+                self.set_out_mute(ch, mute)
 
             link = self.state.get_output(ch, "stereo_link")
             if link is not None:
@@ -218,7 +232,18 @@ class EvoDevice:
     # ---------------- Internal Helper Functions ----------------
 
     def _set_parameter(self, param_name: str, data: bytes, ch: Optional[int] = None, out_ch: Optional[int] = None) -> bool:
-        """Central function for sending USB values based on the dictionary."""
+        """
+        Centralized method for sending USB control parameters.
+
+        Args:
+            param_name (str): The name of the parameter mapped in CATEGORY_TO_HARDWARE.
+            data (bytes): The raw byte data to send.
+            ch (int, optional): The target input or output channel.
+            out_ch (int, optional): The target output channel (used for monitor matrix).
+
+        Returns:
+            bool: True if the USB transfer was successful, False otherwise.
+        """
         mapping = CATEGORY_TO_HARDWARE.get(param_name)
         if not mapping:
             logger.error(f"Unknown parameter: {param_name}")
@@ -236,7 +261,17 @@ class EvoDevice:
         return self.transport.ctrl_set(wValue, mapping["wIndex"], data)
 
     def _get_parameter(self, param_name: str, ch: Optional[int] = None, out_ch: Optional[int] = None) -> bytes:
-        """Central function for querying USB values based on the dictionary."""
+        """
+        Reads a raw USB control parameter directly from the hardware.
+
+        Args:
+            param_name (str): Identifier mapped in CATEGORY_TO_HARDWARE.
+            ch (int, optional): Target channel if applicable.
+            out_ch (int, optional): Target output channel (used with monitor)
+
+        Returns:
+            bytes: Raw byte payload returned by the hardware.
+        """
         mapping = CATEGORY_TO_HARDWARE.get(param_name)
         if not mapping:
             logger.error(f"Unknown parameter: {param_name}")
@@ -256,6 +291,16 @@ class EvoDevice:
 
     @safe_usb_transaction
     def set_phantom(self, ch: int, state: bool) -> bool:
+        """
+        Sets the phantom power state for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+            state (bool): True to enable phantom power, False to disable.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
         state_byte = state.to_bytes(length=1)
         success = self._set_parameter("phantom", state_byte, ch)
         if success:
@@ -264,16 +309,34 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_phantom(self, ch: int) -> bool:
+        """
+        Gets the phantom power state for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+
+        Returns:
+            bool: True if phantom power is enabled, False otherwise.
+        """
         state_byte = self._get_parameter("phantom", ch)
         return state_byte == b'\x01'
 
     @safe_usb_transaction
-    def set_gain(self, ch: int, value: int) -> bool:
-        """Set Gain in % (0 to 100)"""
-        if not is_in_percent_range(value):
-            logger.error(f"set_gain: Invalid gain value {value}")
+    def set_gain(self, ch: int, percent: int) -> bool:
+        """
+        Sets the gain for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+            percent (int): Gain in % (0-100).
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
+        if not is_in_percent_range(percent):
+            logger.error(f"set_gain: Invalid gain value {percent}")
             return False
-        gain_bytes = percent_to_gain_bytes(value)
+        gain_bytes = percent_to_gain_bytes(percent)
         success = self._set_parameter("gain", gain_bytes, ch)
         gain_db = gain_bytes_to_db(gain_bytes)
         if success:
@@ -282,13 +345,30 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_gain(self, ch: int) -> int:
-        """Get Gain in % (0 to 100)"""
+        """
+        Gets the gain for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+
+        Returns:
+            int: Gain in % (0-100).
+        """
         gain_bytes = self._get_parameter("gain", ch)
         return gain_bytes_to_percent(gain_bytes)
 
     @safe_usb_transaction
     def set_gain_db(self, ch: int, gain_db: int) -> bool:
-        """Set Gain in dB (-2048 to 12800)"""
+        """
+        Sets the gain for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+            gain_db (int): Gain in dB (-2048 to 12800)
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
         if gain_db not in range(-2048, 12800):
             logger.error(f"set_gain_db: Invalid gain value {gain_db}")
             return False
@@ -300,12 +380,30 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_gain_db(self, ch: int) -> int:
-        """Get Gain in dB (-2048 to 12800)"""
+        """
+        Gets the gain for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+
+        Returns:
+            int: Gain in dB (-2048 to 12800)
+        """
         gain_bytes = self._get_parameter("gain", ch)
         return gain_bytes_to_db(gain_bytes)
 
     @safe_usb_transaction
     def set_mic_mute(self, ch: int, state: bool) -> bool:
+        """
+        Sets the mute state for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+            state (bool): True to enable mute, False to disable.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
         state_byte = state.to_bytes(length=1)
         success = self._set_parameter("mic_mute", state_byte, ch)
         if success:
@@ -314,11 +412,30 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_mic_mute(self, ch: int) -> bool:
+        """
+        Gets the mute state for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+
+        Returns:
+            bool: True if mute is enabled, False otherwise.
+        """
         state_byte = self._get_parameter("mic_mute", ch)
         return state_byte == b'\x01'
 
     @safe_usb_transaction
     def set_mic_stereo(self, ch: int, state: bool) -> bool:
+        """
+        Sets the stereo state for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+            state (bool): True to enable stereo, False to disable.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
         state_byte = state.to_bytes(length=1)
         success = self._set_parameter("mic_stereo", state_byte, ch)
         if success:
@@ -327,14 +444,32 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_mic_stereo(self, ch: int) -> bool:
+        """
+        Gets the stereo state for a specific input channel.
+
+        Args:
+            ch (int): The input channel number (1-based).
+
+        Returns:
+            bool: True if stereo is enabled, False otherwise.
+        """
         state_byte = self._get_parameter("mic_stereo", ch)
         return state_byte == b'\x01'
 
     # ---------------- Output controls ----------------
 
     @safe_usb_transaction
-    def set_volume(self, volume: int, out_ch: int) -> bool:
-        """Set Output Volume in % (0 to 100)"""
+    def set_volume(self, out_ch: int, volume: int) -> bool:
+        """
+        Sets the master output volume level for a specified output channel using percent.
+
+        Args:
+            volume (int): Volume value expressed as a percentage (0 - 100).
+            out_ch (int): Output channel (1-based).
+
+        Returns:
+            bool: True if transaction was successful, False otherwise.
+        """
         if not is_in_percent_range(volume):
             logger.error(f"set_volume: Invalid volume {volume}")
             return False
@@ -354,18 +489,36 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_volume(self, out_ch: int) -> int:
-        """Get Output Volume in % (0 to 100)"""
+        """
+        Gets the current master output volume level for an output channel in percent.
+
+        Args:
+            out_ch (int): Output channel (1-based).
+
+        Returns:
+            int: Volume level value (0 - 100).
+        """
         vol_bytes = self._get_parameter("volume", ch=out_ch)
 
         if not vol_bytes or len(vol_bytes) < 4:
             return -1
 
-        volume = out_step_to_percent(bytes_to_vol_step(vol_bytes))    # appears to work
+        #volume = out_step_to_percent(bytes_to_vol_step(vol_bytes))
+        volume = bytes_to_vol_percent(vol_bytes)
         return volume
 
     @safe_usb_transaction
-    def set_volume_db(self, volume: float, out_ch: int) -> bool:
-        """Set Output Volume in dB (-128.00 to 0.00)"""
+    def set_volume_db(self, out_ch: int, volume: float) -> bool:
+        """
+        Sets the master volume level for an output channel using decibels.
+
+        Args:
+            volume (float): Target volume level in dB (-128.00 - 0.00).
+            out_ch (int): Output channel (1-based).
+
+        Returns:
+            bool: True if hardware sync succeeded, False otherwise.
+        """
         round_vol = float(f"{volume:.2f}")
         if -128.00 > round_vol > 0.00:
             logger.error(f"set_volume_db: Invalid volume {round_vol}")
@@ -384,8 +537,16 @@ class EvoDevice:
         return success
 
     @safe_usb_transaction
-    def get_volume_db(self, out_ch: int):
-        """Get Output Volume in dB (-128.00 to 0.00)"""
+    def get_volume_db(self, out_ch: int) -> float:
+        """
+        Gets the current master output volume level for an output channel in decibel.
+
+        Args:
+            out_ch (int): Output channel (1-based).
+
+        Returns:
+            int: Volume level value (0 - 100).
+        """
         vol_bytes = self._get_parameter("volume", ch=out_ch)
 
         if not vol_bytes or len(vol_bytes) < 4:
@@ -394,7 +555,17 @@ class EvoDevice:
         return float(f"{decode_uac_volume(vol_bytes):.2f}")
 
     @safe_usb_transaction
-    def set_out_mute(self, state: bool, out_ch: int) -> bool:
+    def set_out_mute(self, out_ch: int, state: bool) -> bool:
+        """
+        Mutes or unmutes a specified output channel.
+
+        Args:
+            state (bool): True to mute, False to unmute.
+            out_ch (int): Target output channel (1-based).
+
+        Returns:
+            bool: True if output mute state was updated successfully.
+        """
         state_byte = state.to_bytes(length=1)
         success = self._set_parameter("out_mute", state_byte, out_ch)
 
@@ -409,16 +580,32 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_out_mute(self, out_ch: int) -> bool:
+        """
+        Retrieves the mute status of an output channel.
+
+        Args:
+            out_ch (int): Target output channel (1-based).
+
+        Returns:
+            bool: True if channel is muted, False otherwise.
+        """
         state_byte = self._get_parameter("out_mute", out_ch)
         return state_byte == b'\x01'
 
     @safe_usb_transaction
-    def set_out_stereo(self, out_ch: int, enable: bool) -> bool:
+    def set_out_stereo(self, out_ch: int, state: bool) -> bool:
         """
-        Toggles Mono/Stereo.
-        ch: The channel from which the action originates (important when enabling the link!)
+        Sets the stereo link state for an output channel pair.
+
+        Args:
+            out_ch (int): The channel from which the action originates. Essential for
+                determining the link direction.
+            state (bool): True to link the channels, False to unlink.
+
+        Returns:
+            bool: True if the hardware and state cache were updated successfully, False otherwise.
         """
-        state_byte = enable.to_bytes(length=1)
+        state_byte = state.to_bytes(length=1)
         # Send the link command (0x0200)
         success = self._set_parameter("out_stereo", state_byte, out_ch)
 
@@ -426,12 +613,12 @@ class EvoDevice:
             partner = get_partner_channel(out_ch)
 
             # 1. Update the link status for both channels in the cache
-            self.state.update_output(out_ch, "stereo_link", enable)
-            self.state.update_output(partner, "stereo_link", enable)
+            self.state.update_output(out_ch, "stereo_link", state)
+            self.state.update_output(partner, "stereo_link", state)
 
             # 2. When linking, the hardware copies the volume from 'ch' to 'partner'.
             #    the cache must now reflect this!
-            if enable:
+            if state:
                 current_vol = self.state.get_output(out_ch, "volume")
                 if current_vol != -1:
                     self.state.update_output(partner, "volume", current_vol)
@@ -440,13 +627,30 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_out_stereo(self, out_ch: int) -> bool:
+        """
+        Queries whether an output channel is configured in a stereo link pair.
+
+        Args:
+            out_ch (int): Target output channel (1-based).
+
+        Returns:
+            bool: True if output channel pair is stereo linked, False otherwise.
+        """
         state_byte = self._get_parameter("out_stereo", out_ch)
         return state_byte == b'\x01'
 
     # ---------------- Monitor Mixer ----------------
 
     def _sync_hardware_for_outputs(self, out_targets: list) -> bool:
-        """Calculates the mix (Volume vs. Mute/Solo/Pan) and sends it to the device."""
+        """
+        Calculates the combined mix parameters and updates the hardware monitor nodes.
+
+        Args:
+            out_targets (list): List of target output channels (1-based) to re-calculate and sync.
+
+        Returns:
+            bool: True if all target mix outputs were updated successfully.
+        """
         success = True
 
         for o_ch in out_targets:
@@ -496,12 +700,22 @@ class EvoDevice:
                 monitor_bytes = encode_uac_volume(vol_to_send)
                 if not self._set_parameter("monitor", monitor_bytes, i_ch, o_ch):
                     success = False
-
         return success
 
     @safe_usb_transaction
-    def set_monitor(self, value: int, in_ch: int, out_ch: int) -> bool:
-        """Set Monitor Volume in % (0 to 100)"""
+    def set_monitor(self, in_ch: int, out_ch: int, value: int) -> bool:
+        """
+        Sets the direct monitoring send level from an input to an output target.
+
+        Args:
+            value (int): Level value for the matrix routing node in percent (0 - 100).
+            in_ch (int): Source monitor input channel (1-based).
+            out_ch (int): Destination output channel (1-based).
+
+        Returns:
+            bool: True if hardware routing update succeeded.
+        """
+
         if not is_in_percent_range(value):
             return False
 
@@ -517,7 +731,7 @@ class EvoDevice:
         # 2. Check Input Link (If Mic 1+2 are linked, include Mic 2 as well)
         if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
             in_targets.append(get_partner_channel(in_ch))
-        elif in_ch > self.profile.num_inputs:
+        elif in_ch > self.profile.num_inputs and self.state.get_monitor_in(in_ch, "mode") != 0:
             # Digital channels (PC / Loopback) are typically stereo pairs by default
             in_targets.append(get_partner_channel(in_ch))
 
@@ -531,17 +745,25 @@ class EvoDevice:
         out_targets = list(set(out_targets))
         in_targets = list(set(in_targets))
 
-        # Update cache with the master volume
         for i in in_targets:
             for o in out_targets:
                 self.state.update_monitor(i, o, "volume", value_db)
 
-        # Synchronize hardware
         return self._sync_hardware_for_outputs(out_targets)
 
     @safe_usb_transaction
     def get_monitor(self, in_ch: int, out_ch: int) -> int:
-        """Get Monitor Volume in % (0 to 100)"""
+        """
+        Gets the direct monitoring send level for a specific matrix node.
+
+        Args:
+            in_ch (int): Source monitor input channel (1-based).
+            out_ch (int): Destination output channel (1-based).
+
+        Returns:
+            int: Routing node monitor-volume value in percent (0 - 100).
+        """
+
         monitor_vol_bytes = self._get_parameter("monitor", in_ch, out_ch)
 
         if monitor_vol_bytes == b'\x00\x00\xff\xff':
@@ -551,8 +773,19 @@ class EvoDevice:
         return monitor_vol
 
     @safe_usb_transaction
-    def set_monitor_db(self, value_db: float, in_ch: int, out_ch: int) -> bool:
-        """Set Monitor Volume in dB (-128.00 to +8.00)"""
+    def set_monitor_db(self, in_ch: int, out_ch: int, value_db: float) -> bool:
+        """
+        Sets the direct monitoring send level from an input to an output target.
+
+        Args:
+            value_db (float): Level value for the matrix routing node in decibel (-128.00 - +8.00).
+            in_ch (int): Source monitor input channel (1-based).
+            out_ch (int): Destination output channel (1-based).
+
+        Returns:
+            bool: True if hardware routing update succeeded.
+        """
+
         in_targets = [in_ch]
         out_targets = [out_ch]
 
@@ -560,10 +793,10 @@ class EvoDevice:
         if self.state.get_output(out_ch, "stereo_link"):
             out_targets.append(get_partner_channel(out_ch))
 
-        # 2. Check Input Link (If Mic 1+2 are linked, include Mic 2 as well)
+        # 2. Check Input Link (If Mic 1 + Mic 2 are linked, include Mic 2 as well)
         if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
             in_targets.append(get_partner_channel(in_ch))
-        elif in_ch > self.profile.num_inputs:
+        elif in_ch > self.profile.num_inputs and self.state.get_monitor_in(in_ch, "mode") != 0:
             # Digital channels (PC / Loopback) are typically stereo pairs by default
             in_targets.append(get_partner_channel(in_ch))
 
@@ -576,17 +809,25 @@ class EvoDevice:
         out_targets = list(set(out_targets))
         in_targets = list(set(in_targets))
 
-        # Update cache with the master volume
         for i in in_targets:
             for o in out_targets:
                 self.state.update_monitor(i, o, "volume", float(f"{value_db:.2f}"))
 
-        # Synchronize hardware
         return self._sync_hardware_for_outputs(out_targets)
 
     @safe_usb_transaction
     def get_monitor_db(self, in_ch: int, out_ch: int) -> float:
-        """Get Monitor Volume in dB (-128.00 to +8.00)"""
+        """
+        Gets the direct monitoring send level for a specific matrix node.
+
+        Args:
+            in_ch (int): Source monitor input channel (1-based).
+            out_ch (int): Destination output channel (1-based).
+
+        Returns:
+            float: Routing node monitor-volume value in decibel (-128.00 - +8.00).
+        """
+
         monitor_vol_bytes = self._get_parameter("monitor", in_ch, out_ch)
 
         if monitor_vol_bytes == b'\x00\x00\xff\xff':
@@ -596,23 +837,34 @@ class EvoDevice:
         return float(f"{monitor_db:.2f}")
 
     @safe_usb_transaction
-    def set_monitor_mute(self, state: bool, in_ch: int, out_ch: int) -> bool:
+    def set_monitor_mute(self, in_ch: int, out_ch: int, state: bool) -> bool:
+        """
+        Sets mute state for a monitor node.
+
+
+        Args:
+            state (bool): True to enable mute, False to disable.
+            in_ch (int): Source monitor input channel.
+            out_ch (int): Destination output channel.
+
+        Returns:
+            bool: True if mute state updated successfully.
+        """
+
         # 1. Input pair (if Stereo Link is active)
         in_targets = [in_ch]
         if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
             in_targets.append(get_partner_channel(in_ch))
-        elif in_ch > self.profile.num_inputs:
-            in_targets.append(get_partner_channel(in_ch))  # Digital immer Stereo
+        elif in_ch > self.profile.num_inputs and self.state.get_monitor_in(in_ch, "mode") != 0:
+            in_targets.append(get_partner_channel(in_ch))
 
         # 2. Output pair (A mix is ALWAYS L+R)
         base_out = out_ch if out_ch % 2 != 0 else out_ch - 1
         out_targets = [base_out, base_out + 1]
 
-        # 3. Artist Mix Mirroring
         if not self.state.get_global("artist_mix") and out_targets == [1, 2]:
             out_targets.extend([3, 4])
 
-        # 4. Update state for the entire channel strip
         for i in set(in_targets):
             for o in set(out_targets):
                 self.state.update_monitor(i, o, "mute", state)
@@ -620,7 +872,19 @@ class EvoDevice:
         return self._sync_hardware_for_outputs(list(set(out_targets)))
 
     @safe_usb_transaction
-    def set_monitor_solo(self, state: bool, in_ch: int, out_ch: int) -> bool:
+    def set_monitor_solo(self, in_ch: int, out_ch: int, state: bool) -> bool:
+        """
+        Sets solo state for a monitor node.
+
+        Args:
+            state (bool): True to enable soloing, False to disable.
+            in_ch (int): Source monitor input channel.
+            out_ch (int): Destination output channel.
+
+        Returns:
+            bool: True if solo state updated successfully.
+        """
+
         in_targets = [in_ch]
         if in_ch <= self.profile.num_inputs and self.state.get_input(in_ch, "stereo_link"):
             in_targets.append(get_partner_channel(in_ch))
@@ -640,16 +904,46 @@ class EvoDevice:
         return self._sync_hardware_for_outputs(list(set(out_targets)))
 
     def get_monitor_mute(self, in_ch: int, out_ch: int) -> bool:
+        """
+        Reads the current mute state of a specific monitor matrix node.
+
+        Args:
+            in_ch (int): Source monitor input channel.
+            out_ch (int): Destination output channel.
+
+        Returns:
+            bool: True if node is muted, False otherwise.
+        """
+
         return self.state.get_monitor(in_ch, out_ch, "mute")
 
     def get_monitor_solo(self, in_ch: int, out_ch: int) -> bool:
+        """
+        Reads the current solo state of a specific monitor matrix node.
+
+        Args:
+            in_ch (int): Source monitor input channel.
+            out_ch (int): Destination output channel.
+
+        Returns:
+            bool: True if node is soloed, False otherwise.
+        """
         return self.state.get_monitor(in_ch, out_ch, "solo")
 
     @safe_usb_transaction
-    def set_monitor_pan(self, pan: float, in_ch: int, out_ch: int) -> bool:
+    def set_monitor_pan(self, in_ch: int, out_ch: int, pan: float) -> bool: # TODO: FINISH Monitor-Input logic
         """
-        Set the panning (0.0 = Left, 0.5 = Center, 1.0 = Right).
+        Sets the panning of a monitor node to state-cache, then syncs cache to hardware
+
+        Args:
+            pan (float): Panning of a monitor node (0.00 = Left, 0.50 = Center, 1.00 = Right).
+            in_ch (int): Source monitor input channel.
+            out_ch (int): Destination output channel.
+
+        Returns:
+            bool: True if pan value updated successfully, False otherwise.
         """
+
         if not (0.0 <= pan <= 1.0):
             return False
 
@@ -673,12 +967,118 @@ class EvoDevice:
         return self._sync_hardware_for_outputs(out_targets)
 
     def get_monitor_pan(self, in_ch: int, out_ch: int) -> float:
+        """
+        Gets the panning of a monitor node from state-cache.
+
+        Args:
+            in_ch (int): Source monitor input channel.
+            out_ch (int): Destination output channel.
+
+        Returns:
+            float: Panning of a monitor node (0.00 = Left, 0.50 = Center, 1.00 = Right).
+        """
+
         return self.state.get_monitor(in_ch, out_ch, "pan")
 
-    def set_artist_mix(self, enable: bool) -> bool:
-        self.state.update_global("artist_mix", enable)
+    def set_monitor_in_stereo(self, in_ch:int, state: bool): # TODO: make it sync and add decorator
+        """
+        Sets the stereo state for a specific monitor input channel to state cache.
 
-        if not enable:
+        Args:
+            in_ch (int): The monitor input channel number (1-based).
+            state (bool): True to enable stereo, False to disable.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
+
+        if not state:
+            self.state.update_monitor_in(in_ch, "mode", 0)
+        else:
+            if in_ch % 2 == 0:
+                self.state.update_monitor_in(in_ch, "mode", 1)
+            else:
+                self.state.update_monitor_in(in_ch, "mode", 2)
+
+
+    def get_monitor_in_stereo(self, in_ch:int) -> bool:
+        """
+        Gets the stereo state for a specific monitor input channel from state cache.
+
+        Args:
+            in_ch (int): The monitor input channel number (1-based).
+
+        Returns:
+            bool: True if stereo is enabled, False otherwise.
+        """
+        mode = self.state.get_monitor_in(in_ch, "mode")
+        if mode == 1 or mode == 2:
+            return True
+        return False
+
+    def set_monitor_in_mute(self, in_ch:int, state: bool) -> bool: # TODO: make it sync and add decorator
+        """
+        Sets the mute state for a specific monitor input channel to state cache.
+
+        Args:
+            in_ch (int): The monitor input channel number (1-based).
+            state (bool): True to enable mute, False to disable.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
+        raise NotImplemented
+
+    def get_monitor_in_mute(self, in_ch:int) -> bool:
+        """
+        Gets the mute state for a specific monitor input channel from state cache.
+
+        Args:
+            in_ch (int): The monitor input channel number (1-based).
+
+        Returns:
+            bool: True if mute is enabled, False otherwise.
+        """
+        raise NotImplemented
+
+    def set_monitor_in_name(self, in_ch:int, name: str) -> bool:
+        """
+        Sets the name for a specific monitor input channel to state cache.
+
+        Args:
+            in_ch (int): The monitor input channel number (1-based).
+            name (str): The name of a monitor input channel.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
+        """
+        raise NotImplemented
+
+    def get_monitor_in_name(self, in_ch:int) -> str:
+        """
+        Gets the name of a specific monitor input channel from state cache.
+
+        Args:
+            in_ch (int): The monitor input channel number (1-based).
+
+        Returns:
+            str: The name of a monitor input channel.
+        """
+        raise NotImplemented
+
+    def set_artist_mix(self, state: bool) -> bool: #TODO: actually restructure to utilize success values, currently can only return True
+        """
+        Enables or disables Artist Mix in State-Cache.
+
+        Args:
+            state (bool): True to activate Artist Mix mode, False to deactivate.
+
+        Returns:
+            bool: True if mode state was sent successfully.
+        """
+        self.state.update_global("artist_mix", state)
+
+        if not state:
             if self.profile.num_outputs >= 4:
                 # Artist Mix off: overwrite 3+4 with 1+2 in state
                 for in_ch in range(1, self.profile.num_monitor_inputs + 1):
@@ -693,24 +1093,35 @@ class EvoDevice:
         return True
 
     def get_artist_mix(self) -> bool:
+        """
+        Get Artist Mix from State-Cache
+
+        Returns:
+            bool: True if Artist Mix is enabled, False otherwise.
+        """
         return self.state.get_global("artist_mix")
 
     # ---------------- Loopback ----------------
 
     @safe_usb_transaction
     def set_loopback_source(self, loopback_source: str) -> bool:
-        """Set Stereo Loopback Source via a string"""
+        """
+        Configures the source stream assigned to the loopback input channel pair.
+
+        Args:
+            loopback_source (str): Descriptive source identifier ('PC1+2', 'PC3+4', 'LB1+2', 'MM1+2', 'AM1+2').
+
+        Returns:
+            bool: True if loopback routing changed successfully.
+        """
         if loopback_source not in LOOPBACK_SOURCES:
             raise ValueError(f"Invalid loopback source. Supported: {list(LOOPBACK_SOURCES.keys())}")
 
-        # Cleanly unpack addresses and data bytes from the dictionaries
-        wValue_left, wValue_right = 0x0604, 0x0605
         data_left, data_right = LOOPBACK_SOURCES[loopback_source]
 
-        # Write both channels
-        success = self.transport.ctrl_set(wValue_left, 0x3300, data_left)
+        success = self._set_parameter("loopback_left", data=data_left)
         if success:
-            success = self.transport.ctrl_set(wValue_right, 0x3300, data_right)
+            success = self._set_parameter("loopback_right", data=data_right)
 
         if success:
             self.state.update_global("loopback_source", loopback_source)
@@ -719,51 +1130,92 @@ class EvoDevice:
 
     @safe_usb_transaction
     def get_loopback_source(self) -> str:
-        """Get Stereo Loopback Source as string"""
-        # Unpack addresses from the dictionary
-        wValue_left, wValue_right = 0x0604, 0x0605
+        """
+        Retrieves the active source mapped to the hardware loopback channels.
 
-        # Query values from the hardware
-        loopback_byte_left = self.transport.ctrl_get(wValue_left, 0x3300, length=1)
-        loopback_byte_right = self.transport.ctrl_get(wValue_right, 0x3300, length=1)
+        Returns:
+            str: Currently assigned loopback source name ('PC1+2', 'PC3+4', 'LB1+2', 'MM1+2', 'AM1+2').
+        """
+
+        loopback_byte_left = self._get_parameter("loopback_left")
+        loopback_byte_right = self._get_parameter("loopback_right")
 
         return LOOPBACK_MAPPINGS_INV.get((loopback_byte_left, loopback_byte_right), "Unknown loopback group")
 
     @safe_usb_transaction
     def get_loopback_source_left(self) -> bytes:
-        """Get Left Loopback Source as hardware bytes"""
-        return self.transport.ctrl_get(0x0604, 0x3300, length=1)
+        """
+        Retrieves the source byte mapped to the left loopback channel.
+
+        Returns:
+            bytes: Active source identifier for left loopback channel.
+        """
+        return self._get_parameter("loopback_left")
 
     @safe_usb_transaction
     def get_loopback_source_right(self) -> bytes:
-        """Get Right Loopback Source as hardware bytes"""
-        return self.transport.ctrl_get(0x0605, 0x3300, length=1)
+        """
+        Retrieves the source byte mapped to the right loopback channel.
+
+        Returns:
+            bytes: Active source identifier for right loopback channel.
+        """
+        return self._get_parameter("loopback_right")
 
     # ---------------- Sample Rate ----------------
 
     @safe_usb_transaction
     def get_sample_rate(self) -> int:
-        sr_bytes = self.transport.ctrl_get(0x0100,0x2900, 4)
-        return SAMPLE_RATE_INV.get(sr_bytes, -1)
+        """
+        Reads the currently configured operating sample rate from the device.
+
+        Returns:
+            int: Active sample rate in Hz (44100, 48000, 88200, 96000).
+        """
+        sample_rate_bytes = self._get_parameter("sample_rate")
+        return SAMPLE_RATES_INV.get(sample_rate_bytes, -1)
 
     @safe_usb_transaction
-    def set_sample_rate(self, sr:int) -> bool:
-        if sr not in SAMPLE_RATES:
-            raise ValueError(f"Unsupported sample rate {sr}. Supported: {list(SAMPLE_RATES.keys())}")
-        success = self.transport.ctrl_set(0x0100, 0x2900, SAMPLE_RATES[sr])
+    def set_sample_rate(self, sample_rate:int) -> bool:
+        """
+        Changes the operating audio sample rate on the hardware device.
+
+        Args:
+            sample_rate (int): Desired sample rate in Hz. (44100,48000,88200,96000)
+
+        Returns:
+            bool: True if sample rate was switched successfully, False otherwise.
+        """
+        if sample_rate not in SAMPLE_RATES:
+            raise ValueError(f"Unsupported sample rate {sample_rate}. Supported: {list(SAMPLE_RATES.keys())}")
+        success = self._set_parameter("sample_rate", data=SAMPLE_RATES[sample_rate])
         if success:
-            self.state.update_global("sample_rate", sr)
+            self.state.update_global("sample_rate", sample_rate)
         return success
 
     # ---------------- Events ----------------
 
     @safe_usb_transaction
     def event_listen(self) -> Optional[bytes]:
-        """Get Event from hardware buffer-stack"""
-        return self.transport.ctrl_get(0x0600, 0x3E00, 4, 500)
+        """
+        Gets event from hardware buffer-stack
+
+        Returns:
+            bytes, optional: Raw event byte packet if received, None on timeout.
+        """
+        return self._get_parameter("get_event")
+
 
     def event_changed(self, new_state: bytes) -> bool:
-        """Check if a new event occurred"""
+        """
+        Compares new buffer element with the last.
+
+        Return:
+            bool: True if the new buffer element differs from the one before (saved in self._last_state), False otherwise.
+
+        Args:
+            new_state (bytes): Raw payload received from event_listen.
+        """
         if new_state != self._last_state:
             self._last_state = new_state
             return True

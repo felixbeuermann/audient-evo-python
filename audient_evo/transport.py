@@ -45,25 +45,41 @@ class EvoUsbTransport:
     @classmethod
     def discover(cls) -> "EvoUsbTransport":
         """
-        Scannt den USB-Bus nach Audient EVO Geräten, identifiziert das Modell
-        und gibt eine vorkonfigurierte Transport-Instanz zurück.
+        Scans the USB bus for Audient EVO devices.
+
+        Identifies the specific device model based on the Product ID (PID) and returns
+        a pre-configured transport instance.
+
+        Returns:
+            EvoUsbTransport: An instance configured for the detected device.
+
+        Raises:
+            RuntimeError: If no Audient USB device is found or the model is unknown.
         """
-        # Scanne nach allen Audient-Geräten auf dem Bus
         devices = list(usb.core.find(find_all=True, idVendor=0x2708))
 
         if not devices:
-            raise RuntimeError("Kein Audient USB-Gerät gefunden.")
+            raise RuntimeError("No Audient USB-Device found.")
 
         for dev in devices:
             pid = dev.idProduct
             if pid in EVO_PROFILES:
                 profile = EVO_PROFILES[pid]
-                logger.info(f"✨ Audient Hardware erkannt: {profile.name} (PID: {hex(pid)})")
+                logger.info(f"✨ Audient Hardware recognised: {profile.name} (PID: {hex(pid)})")
                 return cls(dev=dev, profile=profile)
 
-        raise RuntimeError("Audient-Gerät gefunden, aber Modell (PID) ist unbekannt.")
+        raise RuntimeError("Audient-Device found, but Model (PID) is unknown.")
 
     def connect(self) -> Optional[EvoUsbTransport]:
+        """
+        Claims the USB device interface and detaches kernel drivers if necessary.
+
+        Returns:
+            EvoUsbTransport: The connected transport instance.
+
+        Raises:
+            RuntimeError: If the device is uninitialized or interface claiming fails.
+        """
         if self.dev is None:
             raise RuntimeError("Device is None. was discover() called?")
         # Detach kernel drivers (interfaces 0–3)
@@ -85,6 +101,7 @@ class EvoUsbTransport:
         return self
 
     def release(self) -> None:
+        """Releases the USB interface, disposes resources, and reattaches kernel drivers."""
         if not self._is_connected or self.dev is None:
             return
 
@@ -112,9 +129,16 @@ class EvoUsbTransport:
         self.ghost_mode = True
 
     def is_connected(self) -> bool:
+        """
+        Checks whether an active USB connection to the device is established.
+
+        Returns:
+            bool: True if interface is claimed and transport is active, False otherwise.
+        """
         return self.dev is not None and self._is_connected
 
     def _setup_graceful_exit(self):
+        """Registers signal handlers and exit hooks to release USB resources cleanly on application teardown."""
         def cleanup(signum=None, frame=None):
             # Attempts to unconditionally release the driver
             try:
@@ -132,11 +156,17 @@ class EvoUsbTransport:
     # ---------------- Internal helpers ----------------
 
     def _ensure_bound(self) -> None:
+        """
+        Verifies that the USB device interface is claimed and ready for communication.
+
+        Raises:
+            RuntimeError: If dev is None.
+        """
         if self.dev is None: raise UsbNotBoundError()
 
     def ping(self) -> bool:
         try:
-            self.dev.ctrl_transfer( # TODO: CONFIRM THIS WORKS, NOT MANUALLY TESTED
+            self.dev.ctrl_transfer( # TODO.md: CONFIRM THIS WORKS, NOT MANUALLY TESTED
                 0x80,
                 0x06,
                 0x0100,
@@ -150,7 +180,12 @@ class EvoUsbTransport:
             return False
 
     def _handle_usb_error(self, e):
+        """
+        Processes and logs USB communication exceptions.
 
+        Args:
+            e (Exception): The caught libusb or communication exception instance.
+        """
         errno = getattr(e, "errno", None)
 
         if errno == 19:
@@ -172,17 +207,40 @@ class EvoUsbTransport:
     # ---------------- USB control transfers ----------------
 
     def ctrl_get(self, wValue: int, wIndex: int, length: int = 4, timeout: int = 500) -> bytes:
+        """
+        Executes a USB control IN transfer to retrieve data from the device.
+
+        Args:
+            wValue (int): The value field for the setup packet.
+            wIndex (int): The index field for the setup packet.
+            length (int): The expected length of the returned data.
+            timeout (int): The timeout for the operation in milliseconds.
+
+        Returns:
+            bytes: The raw data retrieved from the device, or zeroed bytes if in ghost mode.
+        """
         if self.ghost_mode:
             return b"\x00" * length
         self._ensure_bound()
         try:
-            #print(f"Sending control transfer to EVO device. wValue: {wValue:02X} wIndex: {wIndex:02X} length:{length}")
             return bytes(self.dev.ctrl_transfer(0xA1, 0x01, wValue, wIndex, length, timeout))
         except usb.core.USBError as e:
             self._handle_usb_error(e)
             return b"\x00" * length
 
     def ctrl_set(self, wValue: int, wIndex: int, data: bytes, timeout: int = 500) -> bool:
+        """
+        Executes a USB control OUT transfer to send data to the device.
+
+        Args:
+            wValue (int): The value field for the setup packet.
+            wIndex (int): The index field for the setup packet.
+            data (bytes): The raw data bytes to transmit.
+            timeout (int): The timeout for the operation in milliseconds.
+
+        Returns:
+            bool: True if the USB OUT control transfer succeeded, False otherwise.
+        """
         if self.ghost_mode:
             return True
         self._ensure_bound()

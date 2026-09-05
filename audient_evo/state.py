@@ -9,15 +9,23 @@ No USB or Threading logic lives here.
 
 from dataclasses import dataclass
 import logging
-
 import xml.etree.ElementTree as ET
-
 from audient_evo.protocol import DeviceCapabilities, XML_LOOPBACK_SOURCE_MAPPING
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class InputState:
+    """
+    Dataclass holding the current hardware state for a single physical input channel.
+
+    Attributes:
+        gain (int): The current input gain value in raw steps or dB representation.
+        phantom (bool): Active status of +48V phantom power.
+        mute (bool): Mute status of the input channel.
+        stereo_link (bool): True if linked with its adjacent channel pair.
+        name (str): Display name for the channel.
+    """
     gain: int = -1
     phantom: bool = False
     mute: bool = False
@@ -26,6 +34,15 @@ class InputState:
 
 @dataclass
 class OutputState:
+    """
+    Dataclass holding the state for a physical output channel pair.
+
+    Attributes:
+        volume (float): Master volume output level.
+        mute (bool): Mute status of the output channel.
+        stereo_link (bool): True if stereo linking is active.
+        name (str): Display name for the output.
+    """
     volume: float = -1.00
     mute: bool = False
     stereo_link: bool = True
@@ -33,21 +50,28 @@ class OutputState:
 
 @dataclass
 class MonitorInputState:
-    """Channel-Strip im Mixer (10)."""
+    """Represents Output Agnostic Monitor-Strips""" #TODO
     name: str = ""
     mode: int = 0  # 0 = Mono, 1 = Stereo Left, 2 = Stereo Right
     cut: bool = False
 
 @dataclass
 class MatrixNode:
-    """Represents the individual monitor matrix nodes."""
+    """Represents the individual monitor matrix nodes."""   #TODO
     volume: float = -1.00
     pan: float = 0.5
-    mute: bool = False  # TODO: GET RID OF THIS HERE
     solo: bool = False
 
 @dataclass
 class GlobalState:
+    """
+    Dataclass storing global audio interface parameters.
+
+    Attributes:
+        loopback_source (str): Currently selected audio source for loopback recording.
+        sample_rate (int): Active device sample rate in Hz.
+        artist_mix (bool): Active status of artist mix routing mode.
+    """
     loopback_source: str = None
     sample_rate: int = -1
     artist_mix: bool = False
@@ -58,10 +82,6 @@ class EvoStateManager:
     def __init__(self, capabilities: DeviceCapabilities):
         self.capabilities = capabilities
         self.preset_loaded = False
-
-        # Callback-Registry (Dictionary, that stores lists of functions)
-        # z.B. {"gain": [func1, func2], "mute": [func3]}
-        self._callbacks = {}
 
         # --- Inputs (1-4) ---
         self.inputs = {ch: InputState() for ch in range(1, self.capabilities.num_inputs+1)}
@@ -112,41 +132,35 @@ class EvoStateManager:
         # --- Global State ---
         self.globals = GlobalState()
 
-    def bind(self, event_key: str, callback: callable):
-        """Register a callback for an event (i.e. 'gain')."""
-        if event_key not in self._callbacks:
-            self._callbacks[event_key] = []
-        if callback not in self._callbacks[event_key]:
-            self._callbacks[event_key].append(callback)
-
-    def unbind(self, event_key: str, callback: callable):
-        """Unregister a callback from an event."""
-        if event_key in self._callbacks and callback in self._callbacks[event_key]:
-            self._callbacks[event_key].remove(callback)
-
-    def _fire_event(self, event_key: str, *args, **kwargs):
-        """Invoke all callbacks registered for an event."""
-        if event_key in self._callbacks:
-            for callback in self._callbacks[event_key]:
-                try:
-                    callback(*args, **kwargs)
-                except Exception as e:
-                    logger.error(f"Error in callback for event_key:'{event_key}': {e}")
-
     # ---------------- INPUTS ----------------
 
     def update_input(self, ch: int, key: str, value) -> None:
-        """Update a value of an input channel in cache."""
+        """
+        Updates an attribute for an input channel in the cache.
+
+        Args:
+            ch (int): The input channel.
+            key (str): Attribute name to update.
+            value: New value to assign.
+        """
         if ch in self.inputs and hasattr(self.inputs[ch], key):
             old_val = getattr(self.inputs[ch], key)
             if old_val != value: # Only update if the value is new
                 setattr(self.inputs[ch], key, value)
-                self._fire_event(key, ch, value)  # Fires event="gain", ch=1, value=45
         else:
             logger.warning(f"Unknown input attribute: {key}")
 
     def get_input(self, ch: int, key: str):
-        """Retrieve a value from the input cache."""
+        """
+        Retrieves an attribute value for an input channel from the cache.
+
+        Args:
+            ch (int): The input channel.
+            key (str): Attribute name to read.
+
+        Returns:
+            Any: The attribute value if found, or None if channel or key does not exist.
+        """
         if ch in self.inputs and hasattr(self.inputs[ch], key):
             return getattr(self.inputs[ch], key, None)
         return None
@@ -154,17 +168,32 @@ class EvoStateManager:
     # ---------------- OUTPUTS ----------------
 
     def update_output(self, out_ch: int, key: str, value) -> None:
-        """Update a value of an output channel in cache."""
+        """
+        Updates an attribute for an output channel in the cache.
+
+        Args:
+            out_ch (int): The output channel.
+            key (str): Attribute name to update.
+            value: New value to assign.
+        """
         if out_ch in self.outputs and hasattr(self.outputs[out_ch], key):
             old_val = getattr(self.outputs[out_ch], key)
             if old_val != value:
                 setattr(self.outputs[out_ch], key, value)
-                self._fire_event(key, out_ch, value)
         else:
             logger.warning(f"Unknown output attribute: {key}")
 
     def get_output(self, out_ch: int, key: str):
-        """Retrieve a value from the output cache."""
+        """
+        Retrieves an attribute value for an output channel from the cache.
+
+        Args:
+            out_ch (int): The output channel.
+            key (str): Attribute name to read.
+
+        Returns:
+            Any: The attribute value if found, or None.
+        """
         if out_ch in self.outputs and hasattr(self.outputs[out_ch], key):
             return getattr(self.outputs[out_ch], key, None)
         return None
@@ -172,33 +201,143 @@ class EvoStateManager:
     # ---------------- MONITOR ----------------
 
     def update_monitor(self, in_ch: int, out_ch: int, key: str, value):
-        """Update a value of a monitor channel in cache."""
+        """
+        Updates a matrix node attribute in the monitor matrix cache.
+
+        Args:
+            in_ch (int): Input channel of the matrix node.
+            out_ch (int): Target output channel of the matrix node.
+            key (str): Attribute name to update (e.g., 'volume', 'pan').
+            value: New value to assign.
+        """
         node = self.matrix.get((in_ch, out_ch))
         if node and hasattr(node, key):
             old_val = getattr(node, key)
             if old_val != value:
                 setattr(node, key, value)
-                self._fire_event(f"monitor_{key}", in_ch, out_ch, value)
 
     def get_monitor(self, in_ch: int , out_ch: int, key: str):
+        """
+        Retrieves a matrix node attribute value from the monitor matrix cache.
+
+        Args:
+            in_ch (int): Input channel of the matrix node.
+            out_ch (int): Output channel of the matrix node.
+            key (str): Attribute name to read.
+
+        Returns:
+            Any: Attribute value if present, otherwise None.
+        """
         node = self.matrix.get((in_ch, out_ch))
         if node and hasattr(node, key):
             return getattr(node, key)
         return None
 
+    def update_monitor_in(self, in_ch: int, key: str, value):
+        """
+        Updates an attribute of a monitor input channel-strip in the cache.
+
+        Args:
+            in_ch (int): Monitor input channel.
+            key (str): Attribute name to update (e.g., 'mode', 'cut').
+            value: New value to assign.
+        """
+        if in_ch in self.monitor_inputs and hasattr(self.monitor_inputs[in_ch], key):
+            old_val = getattr(self.monitor_inputs[in_ch], key)
+            if old_val != value:
+                setattr(self.monitor_inputs[in_ch], key, value)
+        else:
+            logger.warning(f"Unknown input attribute: {key}")
+
+    def get_monitor_in(self, in_ch: int, key: str):
+        """
+        Retrieves an attribute value from a monitor input channel-strip cache.
+
+        Args:
+            in_ch (int): Monitor input channel.
+            key (str): Attribute name to read.
+
+        Returns:
+            Any: Attribute value if present, otherwise None.
+        """
+        if in_ch in self.monitor_inputs and hasattr(self.monitor_inputs[in_ch], key):
+            return getattr(self.monitor_inputs[in_ch], key, None)
+        return None
+
     # ---------------- GLOBALS ----------------
 
     def update_global(self, key: str, value) -> None:
-        """Update a value of a global attribute in cache."""
+        """
+        Updates a global configuration attribute in the local cache.
+
+        Args:
+            key (str): Name of the global attribute to update.
+            value: New value to assign.
+        """
         if hasattr(self.globals, key):
-            setattr(self.globals, key, value)
+            old_value = getattr(self.globals, key)
+            if old_value != value:
+                setattr(self.globals, key, value)
         else:
             logger.warning(f"Unknown global attribute: {key}")
 
     def get_global(self, key: str):
+        """
+        Retrieves a global configuration attribute from the local cache.
+
+        Args:
+            key (str): Name of the global attribute to read.
+
+        Returns:
+            Any: Attribute value if present, otherwise None.
+        """
         return getattr(self.globals, key, None)
 
     # ---------------- EXPORT / IMPORT ----------------
+
+    def get_full_state_dict(self) -> dict:
+        """
+        Flattens the hierarchical hardware state cache into a one-dimensional dictionary.
+
+        Returns:
+            dict: A flat dictionary containing all current inputs, outputs, monitor matrices,
+            and global configurations.
+        """
+        full_state = {}
+
+        # 1. Inputs (Preamps)
+        for ch, inp in self.inputs.items():
+            full_state[f"input_{ch}_gain"] = inp.gain
+            full_state[f"input_{ch}_phantom"] = inp.phantom
+            full_state[f"input_{ch}_mute"] = inp.mute
+            full_state[f"input_{ch}_stereo_link"] = inp.stereo_link
+            full_state[f"input_{ch}_name"] = inp.name
+
+        # 2. Outputs (Master)
+        for ch, out in self.outputs.items():
+            full_state[f"output_{ch}_volume"] = out.volume
+            full_state[f"output_{ch}_mute"] = out.mute
+            full_state[f"output_{ch}_stereo_link"] = out.stereo_link
+            full_state[f"output_{ch}_name"] = out.name
+
+        # 3. Monitor Inputs (Output Agnostic Monitor-Strips)
+        for ch, mon_in in self.monitor_inputs.items():
+            full_state[f"monin_{ch}_mode"] = mon_in.mode
+            full_state[f"monin_{ch}_cut"] = mon_in.cut
+            full_state[f"monin_{ch}_name"] = mon_in.name
+
+        # 4. Monitor Matrix (Individual Nodes)
+        for (in_ch, out_ch), node in self.matrix.items():
+            full_state[f"matrix_{in_ch}_{out_ch}_volume"] = node.volume
+            full_state[f"matrix_{in_ch}_{out_ch}_pan"] = node.pan
+            full_state[f"matrix_{in_ch}_{out_ch}_solo"] = node.solo
+
+        # 5. Globals
+        full_state["global_loopback"] = self.get_global('loopback_source')
+        full_state["global_samplerate"] = self.get_global('sample_rate')
+        full_state["global_artistmix"] = self.get_global('artist_mix')
+
+        return full_state
 
     def print_cache(self) -> None:
         """
@@ -258,21 +397,21 @@ class EvoStateManager:
         # loop over the 10 internal inputs (including PC and Loopback)
         for in_ch in range(1, self.capabilities.num_monitor_inputs + 1):
             row_str = f"  IN {in_ch:2} |"
+            cut = self.get_monitor_in(in_ch, "cut")
             for out_ch in range(1, self.capabilities.num_outputs + 1):
                 # Retrieve values defensively from the cache
                 vol = self.get_monitor(in_ch, out_ch, "volume")
                 pan = self.get_monitor(in_ch, out_ch, "pan")
-                mute = self.get_monitor(in_ch, out_ch, "mute")
                 solo = self.get_monitor(in_ch, out_ch, "solo")
 
                 # Defensive formatting for each parameter
                 vol_str = f"{vol:.2f}" if vol not in (None, -1) else "N/A"
                 pan_str = f"{pan:.2f}" if pan is not None else "N/A"
-                m_str = "ON" if mute else "OFF"
-                s_str = "ON" if solo else "OFF"
+                cut_str = "ON" if cut else "OFF"
+                solo_str = "ON" if solo else "OFF"
 
                 # Build cell (V = Volume, P = Pan, M = Mute, S = Solo)
-                cell = f"V:{vol_str:>7} P:{pan_str:>4} M:{m_str:<3} S:{s_str:<3}"
+                cell = f"V:{vol_str:>7} P:{pan_str:>4} M:{cut_str:<3} S:{solo_str:<3}"
 
                 # Center cell and add separator
                 row_str += cell.center(col_width - 1) + "|"
@@ -280,8 +419,16 @@ class EvoStateManager:
 
         print("\n" + "=" * separator_len + "\n")
 
-    def import_from_evo_xml(self, xml_string: str) -> bool:
-        """Loads an official EVO XML preset file, and populates the state cache."""
+    def import_from_xml(self, xml_string: str) -> bool:
+        """
+        Parses an official EVO XML preset file and populates the internal state cache.
+
+        Args:
+            xml_string (str): The XML preset string.
+
+        Returns:
+            bool: True if the XML was parsed and loaded successfully, False otherwise.
+        """
         try:
             root = ET.fromstring(xml_string)
 
@@ -294,9 +441,7 @@ class EvoStateManager:
             # ==========================================
             mixer_node = device_node.find("mixer")
             if mixer_node is not None:
-                artist_mix = int(mixer_node.get("artistMixEnabled", -1))
-                if artist_mix != -1:
-                    self.update_global("artist_mix", bool(artist_mix))
+                self.update_global("artist_mix", mixer_node.get("artistMixEnabled", -1) == "1")
 
             settings = device_node.find("driver-settings")
             if settings is not None:
@@ -338,10 +483,14 @@ class EvoStateManager:
             # 4. MIXER MATRIX (Artist Mix / Main Mix)
             # ==========================================
             for mixer_in in device_node.findall(".//mixer/input"):
-                # in_ch: 0-1 = Mic 1-2, 2 = Mic 3/4, 4-7 = PC 1-4, 8-9 = Loopback
-                # simply map everything strictly +1 (1 to 10)
                 in_ch = int(mixer_in.get("channel", -1)) + 1
-                software_cut = (mixer_in.get("cut") == "1")
+                mon_in_cut = (mixer_in.get("cut") == "1")
+                mon_in_name = (mixer_in.get("name", ""))
+                mon_in_mode = (mixer_in.get("mode", -1))
+
+                self.update_monitor_in(in_ch, "cut", mon_in_cut)
+                self.update_monitor_in(in_ch, "name", mon_in_name)
+                self.update_monitor_in(in_ch, "mode", mon_in_mode)
 
                 for mix in mixer_in.findall("mix"):
                     mix_index = int(mix.get("index", -1))
@@ -354,10 +503,8 @@ class EvoStateManager:
                     out_channels = [1, 2] if mix_index == 0 else [3, 4] if mix_index == 1 else []
 
                     for out_ch in out_channels:
-
                         self.update_monitor(in_ch, out_ch, "volume", vol_db)
                         self.update_monitor(in_ch, out_ch, "pan", pan_val)
-                        self.update_monitor(in_ch, out_ch, "mute", software_cut)
 
             # ==========================================
             # 5. MIXER OUTPUTS
@@ -379,9 +526,15 @@ class EvoStateManager:
             logger.exception(f"unexpected error during XML-Parsing: {e}")
             return False
 
-    def export_to_evo_xml(self, preset_name: str = "Evo_Linux_Export") -> str:
+    def export_to_xml(self, preset_name: str = "EvoLinuxExport") -> str:
         """
-        Exports the cache directly to a save file compatible with the official windows EVO Mixer
+        Exports the current state cache to an XML file compatible with the official EVO Mixer.
+
+        Args:
+            preset_name (str): The name to assign to the exported preset.
+
+        Returns:
+            str: The formatted XML string representing the current state.
         """
         import xml.etree.ElementTree as ET
         from audient_evo.protocol import XML_LOOPBACK_MAPPING_INV
@@ -462,7 +615,7 @@ class EvoStateManager:
             m_in_node = ET.SubElement(mixer_node, "input", inp_attrs)
 
             # --- MIX SUBNODES ---
-            for mix_index, base_out in enumerate((1, self.capabilities.num_outputs + 1, 2)):
+            for mix_index, base_out in enumerate((1, 3)):
                 vol_db = self.get_monitor(in_ch, base_out, "volume")
                 pan = self.get_monitor(in_ch, base_out, "pan")
 
@@ -555,9 +708,9 @@ class EvoStateManager:
         ET.SubElement(routing_node, "loop-back", lb_attrs)
 
         # 6. DRIVER SETTINGS
-        sr = self.get_global("sample_rate")
-        sr_val = str(sr) if sr not in (-1, None) else "48000"
-        ET.SubElement(device, "driver-settings", {"sample-rate": sr_val})
+        sample_rate = self.get_global("sample_rate")
+        sr_str = str(sample_rate) if sample_rate not in (-1, None) else "Error -1"
+        ET.SubElement(device, "driver-settings", {"sample-rate": sr_str})
 
         if hasattr(ET, "indent"):
             ET.indent(presets, space="  ", level=0)

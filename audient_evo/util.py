@@ -40,10 +40,14 @@ def get_partner_channel(ch: int) -> int:
 
 def split_monitor_channel(mon_ch: int) -> tuple[int, int]:
     """
-    Split a combined monitor channel into its input and output channels.
-    equation: wValue = base_offset + (in_ch - 1) * 4 + (out_ch - 1)
-    """
+    Splits a combined monitor matrix address into its logical input and output channels.
 
+    Args:
+        mon_ch (int): The combined monitor channel index.
+
+    Returns:
+        tuple[int, int]: A tuple containing the input channel (in_ch) and output channel (out_ch).
+    """
     # 2. Determine out_ch (remainder of division by 4)
     # Since (out_ch - 1) ranges from 0 to 3, this is modulo 4
     out_ch = (mon_ch % 4) + 1
@@ -71,6 +75,7 @@ MAX_MON_DB: float = 8.00
 # ============================================================================
 
 def gain_db_to_percent(gain_db: int) -> int:
+    """Converts a raw dB gain value to a clamped percentage (0 to 100)."""
     # Clamping into valid range
     clamped = max(MIN_GAIN_DB, min(MAX_GAIN_DB, gain_db))
     # Percent calculation: (raw - min) / (max - min) * 100
@@ -112,8 +117,7 @@ def percent_to_gain_bytes(percent: int) -> bytes:
 # Volume conversion
 # ============================================================================
 
-def generate_out_bytes():               # TODO: maybe replace with alsa mapping ( 0 - 255/4)
-    # total number of steps = count of discrete byte1 values
+def generate_out_bytes():               # TODO.md: maybe replace with alsa mapping ( 0 - 255/4)
     steps = []
     #print(steps)    # currently 160
 
@@ -121,12 +125,11 @@ def generate_out_bytes():               # TODO: maybe replace with alsa mapping 
     def add(b0, b1):
         steps.append([b0, b1, 0xFF, 0xFF])
 
-    #add(0x00, 0x00) # added: "Unknown volume byte sequence: b'00 00 FF FF'"
     add(0x00, 0x80)
     add(0x00, 0x81)
     for b1 in range(0x84, 0xe1, 0x01):
         add(0x00, b1)
-    for b1 in range(0xe0, 0xff, 0x01): # added: 'Unknown volume byte sequence: 80 E0 FF FF'
+    for b1 in range(0xe0, 0xff, 0x01):
         for b0 in (0x00, 0x80):
             add(b0, b1)
     steps.append([0x00, 0xff, 0xff, 0xff])
@@ -152,16 +155,16 @@ def bytes_to_vol_step(data: bytes) -> int:
         raise KeyError(f"Unknown volume byte sequence: {key_str}")
 
 def out_step_to_percent(step: int) -> int:
-    if not 0 <= step <= 160:
-        raise ValueError("step must be in range 0..160")
+    if not 0 <= step <= 159:
+        raise ValueError("step must be in range 0..159")
 
-    return round(step * 100 / 160)
+    return round(step * 100 / 159)
 
 def percent_to_out_step(percent: int) -> int:
     if not 0 <= percent <= 100:
         raise ValueError("percent must be in range 0..100")
 
-    return round(percent * 160 / 100)
+    return round(percent * 159 / 100)
 
 def percent_to_vol_db(percent: int) -> float:
     out_step = percent_to_out_step(percent)
@@ -173,6 +176,14 @@ def vol_db_to_percent(vol_db: float) -> int:
     vol_bytes = encode_uac_volume(vol_db)
     out_step = bytes_to_vol_step(vol_bytes)
     return out_step_to_percent(out_step)
+
+def bytes_to_vol_percent(data: bytes) -> int:   # Takes Bytes, Turns them into dB, then turn dB into Percent directly
+    vol_db = decode_uac_volume(data)
+    return int((vol_db + 128.0) * (100 / 128.0))
+
+def percent_to_vol_bytes(percent: int) -> bytes:    # Turn Percent into Volume Bytes using the generated _OUTPUT_STEPS
+    vol_db = percent_to_vol_db(percent)
+    return encode_uac_volume(vol_db)
 
 # ============================================================================
 # Monitor conversion
@@ -225,7 +236,7 @@ def mon_step_to_bytes(value: int) -> bytes:
     return _MONITOR_STEPS[value]
 
 def bytes_to_mon_step(data: bytes) -> int:
-    if data == b'\x00\x80\x00\x00':
+    if data == b'\x00\x80\x00\x00' or b'\x00\x00\x00\x00':
         return 0  # when the later two bytes are zero then the monitor is off, when it's connected they are both 256
     key = tuple(data)
     try:
@@ -288,15 +299,6 @@ def fmt_bytes(data: bytes) -> str:
 def is_in_percent_range(value):
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100
 
-def bytes_to_bool(data: bytes) -> bool:
-    if len(data) != 1:
-        raise ValueError(f"Expected 1 byte, got {len(data)}")
-
-    return data[0] != 0
-
-def bool_to_bytes(value: bool) -> bytes:
-    return b"\x01" if value else b"\x00"
-
 # ============================================================================
 # UI / ALSA volume mapping
 # ============================================================================
@@ -324,7 +326,8 @@ def evo_curve_inv(y: float) -> float:
     p = SHAPE
     return (y ** (1 / p)) / ((y ** (1 / p)) + ((1 - y) ** (1 / p)))
 
-def ui_volume_to_alsa(ui: int) -> int:  # turns Values between 0 - 100 into 128 - 254
+def ui_volume_to_alsa(ui: int) -> int:
+    """Maps a linear UI volume percentage (0-100) to ALSA driver values (128-254) using a shaping curve."""
     x = ui_to_norm(ui)
     shaped = evo_curve(x)
     return round(shaped * ALSA_MAX)
@@ -356,7 +359,7 @@ def decode_uac_volume(data: bytes) -> float:
         return -128.0
 
     # Cleanly handles the special bypass state during boot
-    if data == b'\x00\x00\xff\xff':
+    if data == b'\x00\x00\xff\xff' or b'\x00\x80\xff\xff':
         return -128.0
 
     raw_val = struct.unpack('<h', data[:2])[0]

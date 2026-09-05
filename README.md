@@ -75,7 +75,7 @@ evo.connect_hardware()
 
 evo.set_gain(1, 40)  # gain range 0 - 100
 # or
-evo.set_gain_db(1, 7552) # gain db range -2048 - 12800
+evo.set_gain_db(1, 7552)  # gain db range -2048 - 12800
 
 evo.set_phantom(1, True)
 

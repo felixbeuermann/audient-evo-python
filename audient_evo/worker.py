@@ -40,7 +40,7 @@ class EvoBackgroundWorker:
         logger.info("EVO Background Worker stopped.")
 
     def _usb_event_loop(self):
-        # Mark the thread: only it can execute USB commands directly
+        """Main loop executing queued USB commands sequentially in a dedicated worker thread."""
         threading.current_thread().is_usb_worker = True
 
         while self._running:
@@ -66,14 +66,21 @@ class EvoBackgroundWorker:
                     pass
 
     def _sync_cache_from_hardware(self, raw_buffer: bytes) -> None:
-        """Interprets the raw USB event bytes and updates the StateManager."""
+        """
+        Interprets raw USB event packets and synchronizes changes to the StateManager.
+
+        Args:
+            raw_buffer (bytes): The raw event buffer containing the selector, channel,
+                and unit information.
+        """
         if not raw_buffer or len(raw_buffer) < 4:
             logger.warning(f"Malformed event buffer received: {raw_buffer}")
             return
 
         selector = raw_buffer[0]
-        ch = raw_buffer[1] + 1  # 0-based auf 1-based konvertieren
-        unit = raw_buffer[3]    # 2 is irrelevant in this case as endpoint 0 is always used
+        ch = raw_buffer[1] + 1  # convert 0-based to 1-based
+        # 2 is irrelevant in this case because only endpoint 0 is used
+        unit = raw_buffer[3]
 
         category = HARDWARE_TO_CATEGORY.get((unit, selector))
         if not category:
@@ -105,10 +112,9 @@ class EvoBackgroundWorker:
                 in_ch, out_ch = split_monitor_channel(ch)
                 value = self.device.get_monitor_db(in_ch, out_ch)
                 self.state.update_monitor(in_ch, out_ch, "volume", value)
-
-            #elif category == "sample_rate":
-            #    value = self.device.get_sample_rate()
-            #    self.state.update_global("sample_rate", value)
+            elif category == "sample_rate":
+                value = self.device.get_sample_rate()
+                self.state.update_global("sample_rate", value)
 
             #elif category == "loopback_left":
             #    value = self.device.get_loopback_source()

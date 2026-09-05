@@ -13,11 +13,11 @@ venv.bak/
 .idea/
 .vscode/
 
-# --- Build-Artefakte (wenn du später paketierst) ---
+# --- Build-Artifacts ---
 dist/
 build/
 *.egg-info/
 
-# --- Betriebssystem ---
+# --- System ---
 .DS_Store
 Thumbs.db
